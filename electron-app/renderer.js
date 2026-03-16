@@ -5,10 +5,16 @@ const dashboardScreen = document.getElementById('dashboard-screen');
 const loginBtn = document.getElementById('login-btn');
 const keyInput = document.getElementById('access-key-input');
 const loginError = document.getElementById('login-error');
+const serverUrlEl = document.getElementById('server-url');
 const workerNameEl = document.getElementById('worker-name');
 const terminal = document.getElementById('terminal-output');
 const activeEngineTag = document.getElementById('active-engine');
 const logoutBtn = document.getElementById('logout-btn');
+
+// Show which server the app is pointed at
+ipcRenderer.invoke('get-backend-url').then(url => {
+    if (serverUrlEl) serverUrlEl.innerText = `🔗 Server: ${url}`;
+});
 
 function showDashboard(owner) {
     loginScreen.classList.add('hidden');

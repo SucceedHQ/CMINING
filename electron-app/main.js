@@ -11,8 +11,21 @@ let heartbeatInterval = null;
 let engineInterval = null;
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'cmining_config.json');
+const SETTINGS_PATH = path.join(app.getPath('userData'), 'cmining_settings.json');
 const ENGINE_PATH = app.isPackaged ? path.join(process.resourcesPath, 'engine') : path.join(__dirname, '..', 'engine');
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:5000';
+
+// Load backend URL from editable settings file (so workers can point to any server)
+function getBackendUrl() {
+    if (fs.existsSync(SETTINGS_PATH)) {
+        try {
+            const s = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+            if (s.backend_url) return s.backend_url.replace(/\/$/, '');
+        } catch(e) {}
+    }
+    return process.env.BACKEND_URL || 'https://succeedhq.pythonanywhere.com';
+}
+
+const BACKEND_URL = getBackendUrl();
 
 function loadConfig() {
     if (fs.existsSync(CONFIG_PATH)) {
@@ -181,16 +194,15 @@ app.on('window-all-closed', function () {
 // --- IPC Listeners ---
 
 ipcMain.handle('validate-key', async (event, key) => {
+    // First check backend is reachable
+    try {
+        await requestBackend('/api/version/check', 'GET', null, null);
+    } catch(e) {
+        return { success: false, error: `Cannot reach the server at ${BACKEND_URL}. Make sure the backend is running.` };
+    }
+
     try {
         const res = await requestBackend('/api/validate', 'POST', { access_key: key });
-        
-        // Check version
-        try {
-           const vres = await requestBackend('/api/version/check', 'GET');
-           if (vres.is_obsolete) {
-               return { success: false, error: `App is obsolete. Please download new version: ${vres.download_url}` };
-           }
-        } catch(e) {}
         
         const config = loadConfig();
         config.accessKey = key;
@@ -200,12 +212,17 @@ ipcMain.handle('validate-key', async (event, key) => {
         
         return { success: true, owner: res.owner };
     } catch (error) {
-        return { success: false, error: error.toString() };
+        const msg = typeof error === 'string' ? error : error.message || 'Invalid access key or server error.';
+        return { success: false, error: msg };
     }
 });
 
 ipcMain.handle('get-config', () => {
     return loadConfig();
+});
+
+ipcMain.handle('get-backend-url', () => {
+    return BACKEND_URL;
 });
 
 ipcMain.handle('logout', () => {

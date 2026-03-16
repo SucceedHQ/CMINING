@@ -22,6 +22,12 @@
   },
   "build": {
     "appId": "com.cmining.worker",
+    "mac": {
+      "target": null
+    },
+    "linux": {
+      "target": null
+    },
     "win": {
       "target": "portable"
     },
