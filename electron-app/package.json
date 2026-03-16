@@ -1,0 +1,36 @@
+{
+  "name": "cmining-worker",
+  "version": "1.0.0",
+  "description": "CMining Distributed Worker Node",
+  "main": "main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "electron-builder -w",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "lucide-react": "^0.344.0",
+    "axios": "^1.6.7"
+  },
+  "devDependencies": {
+    "electron": "^29.0.0",
+    "electron-builder": "^24.13.3",
+    "vite": "^5.1.4",
+    "@vitejs/plugin-react": "^4.2.1"
+  },
+  "build": {
+    "appId": "com.cmining.worker",
+    "win": {
+      "target": "portable"
+    },
+    "extraResources": [
+      {
+        "from": "../engine",
+        "to": "engine",
+        "filter": ["**/*"]
+      }
+    ]
+  }
+}

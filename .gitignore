@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-tsc/
+build/
+.env
+.DS_Store
+*.db
+*.sqlite3
+__pycache__/
+venv/
+.venv/

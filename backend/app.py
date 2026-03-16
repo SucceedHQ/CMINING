@@ -1,0 +1,537 @@
+import os
+import json
+import logging
+from datetime import datetime, timezone, timedelta
+from functools import wraps
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
+import redis
+from dotenv import load_dotenv
+
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+
+# --- Redis Configuration ---
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
+# Allow disabling Redis in strict dev environments if not available
+USE_REDIS = os.environ.get('USE_REDIS', 'true').lower() == 'true'
+if USE_REDIS:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()
+    except Exception as e:
+        app.logger.error(f"Redis connection failed: {e}. Falling back to DB-only queueing.")
+        USE_REDIS = False
+        redis_client = None
+else:
+    redis_client = None
+
+# --- Models ---
+class AccessKey(db.Model):
+    __tablename__ = 'access_keys'
+    id = db.Column(db.Integer, primary_key=True)
+    key_value = db.Column(db.Text, unique=True, nullable=False)
+    owner_name = db.Column(db.Text, nullable=False)
+    wallet_address = db.Column(db.Text)
+    bank_name = db.Column(db.Text)
+    account_number = db.Column(db.Text)
+    account_name = db.Column(db.Text)
+    total_leads_processed = db.Column(db.Integer, default=0)
+    total_successes = db.Column(db.Integer, default=0)
+    total_earnings_ngn = db.Column(db.Numeric, default=0)
+    withdrawn_ngn = db.Column(db.Numeric, default=0)
+    last_active = db.Column(db.DateTime(timezone=True))
+    is_active = db.Column(db.Boolean, default=True)
+    is_banned = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class Keyword(db.Model):
+    __tablename__ = 'keywords'
+    id = db.Column(db.Integer, primary_key=True)
+    keyword_text = db.Column(db.Text, nullable=False)
+    status = db.Column(db.Text, default='pending')
+    assigned_to = db.Column(db.Integer, db.ForeignKey('access_keys.id'))
+    assigned_at = db.Column(db.DateTime(timezone=True))
+    completed_at = db.Column(db.DateTime(timezone=True))
+    result_count = db.Column(db.Integer, default=0)
+
+class Lead(db.Model):
+    __tablename__ = 'leads'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.Text)
+    phone = db.Column(db.Text)
+    website = db.Column(db.Text)
+    address = db.Column(db.Text)
+    keyword_source = db.Column(db.Text)
+    status = db.Column(db.Text, default='new')
+    assigned_to = db.Column(db.Integer, db.ForeignKey('access_keys.id'))
+    assigned_at = db.Column(db.DateTime(timezone=True))
+    last_attempt_at = db.Column(db.DateTime(timezone=True))
+    attempt_count = db.Column(db.Integer, default=0)
+    sequence_step = db.Column(db.Integer, default=1)
+    project_id = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class EarningsLog(db.Model):
+    __tablename__ = 'earnings_log'
+    id = db.Column(db.Integer, primary_key=True)
+    access_key_id = db.Column(db.Integer, db.ForeignKey('access_keys.id'), nullable=False)
+    type = db.Column(db.Text, nullable=False)
+    amount_ngn = db.Column(db.Numeric, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class AppVersion(db.Model):
+    __tablename__ = 'app_versions'
+    id = db.Column(db.Integer, primary_key=True)
+    version_string = db.Column(db.Text, nullable=False)
+    min_required_version = db.Column(db.Text)
+    download_url = db.Column(db.Text)
+    changelog = db.Column(db.Text)
+    is_obsolete = db.Column(db.Boolean, default=False)
+
+class Withdrawal(db.Model):
+    __tablename__ = 'withdrawals'
+    id = db.Column(db.Integer, primary_key=True)
+    access_key_id = db.Column(db.Integer, db.ForeignKey('access_keys.id'), nullable=False)
+    amount_ngn = db.Column(db.Numeric, nullable=False)
+    status = db.Column(db.Text, default='pending')
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    processed_at = db.Column(db.DateTime(timezone=True))
+    admin_note = db.Column(db.Text)
+
+class Notification(db.Model):
+    __tablename__ = 'notifications'
+    id = db.Column(db.Integer, primary_key=True)
+    target = db.Column(db.Text, default='all')
+    title = db.Column(db.Text, nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    is_read = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class BugReport(db.Model):
+    __tablename__ = 'bug_reports'
+    id = db.Column(db.Integer, primary_key=True)
+    access_key_id = db.Column(db.Integer, db.ForeignKey('access_keys.id'), nullable=False)
+    category = db.Column(db.Text, nullable=False)
+    title = db.Column(db.Text, nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    screenshot_url = db.Column(db.Text)
+    status = db.Column(db.Text, default='open')
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+class GlobalSetting(db.Model):
+    __tablename__ = 'global_settings'
+    id = db.Column(db.Text, primary_key=True)
+    value = db.Column(db.JSON, nullable=False)
+
+# --- Middleware ---
+
+def require_key(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        key_val = request.headers.get('X-Access-Key')
+        if not key_val:
+            return jsonify({"error": "Missing access key"}), 401
+        
+        # Cache check could be added here
+        ak = AccessKey.query.filter_by(key_value=key_val).first()
+        if not ak or not ak.is_active or ak.is_banned:
+            return jsonify({"error": "Invalid or revoked access key"}), 403
+            
+        # Update last active (in a real high-throughput env, do this async or via Redis cache)
+        # We'll batch this or let heartbeat handle it to reduce DB writes on every API call
+        request.access_key = ak
+        return f(*args, **kwargs)
+    return decorated_function
+
+def require_admin(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        admin_key = os.environ.get('ADMIN_SECRET_KEY')
+        if not admin_key or request.headers.get('Authorization') != f"Bearer {admin_key}":
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# --- Public / Worker Endpoints ---
+
+@app.route('/api/validate', methods=['POST'])
+def validate():
+    data = request.json or {}
+    key_val = data.get('access_key')
+    if not key_val:
+        return jsonify({"error": "Missing access key"}), 400
+    
+    ak = AccessKey.query.filter_by(key_value=key_val).first()
+    if not ak or not ak.is_active or ak.is_banned:
+        return jsonify({"error": "Invalid access key"}), 403
+        
+    ak.last_active = datetime.now(timezone.utc)
+    db.session.commit()
+    
+    return jsonify({"status": "authorized", "owner": ak.owner_name, "worker_id": ak.id})
+
+@app.route('/api/version/check', methods=['GET'])
+def check_version():
+    client_version = request.args.get('version', '0.0.0')
+    latest = AppVersion.query.order_by(AppVersion.id.desc()).first()
+    if latest:
+        return jsonify({
+            "latest_version": latest.version_string,
+            "min_required_version": latest.min_required_version,
+            "is_obsolete": latest.is_obsolete,
+            "download_url": latest.download_url,
+            "changelog": latest.changelog
+        })
+    return jsonify({"is_obsolete": False, "latest_version": "1.0.0"})
+
+@app.route('/api/heartbeat', methods=['POST'])
+@require_key
+def heartbeat():
+    ak = request.access_key
+    ak.last_active = datetime.now(timezone.utc)
+    db.session.commit()
+    if USE_REDIS:
+        redis_client.setex(f"worker_heartbeat:{ak.id}", 120, "alive")
+    return jsonify({"status": "ok"})
+
+
+# --- Batches ---
+
+@app.route('/api/batch/keywords', methods=['POST'])
+@require_key
+def batch_keywords():
+    ak = request.access_key
+    data = request.json or {}
+    batch_size = min(int(data.get('batch_size', 1)), 10)
+    
+    # CRITICAL: Startup Batch Recovery
+    # Check if the worker already has assigned keywords that aren't completed
+    existing = Keyword.query.filter_by(assigned_to=ak.id, status='assigned').all()
+    if existing:
+        return jsonify({"keywords": [{"id": k.id, "keyword_text": k.keyword_text} for k in existing]})
+    
+    # Get new batch via Redis if available, fallback to DB RPC
+    assigned_keywords = []
+    
+    if USE_REDIS:
+        # LPOP from Redis queue
+        for _ in range(batch_size):
+            kw_id = redis_client.lpop("queue:keywords")
+            if not kw_id: break
+            
+            k = Keyword.query.get(int(kw_id))
+            if k and k.status == 'pending':
+                k.status = 'assigned'
+                k.assigned_to = ak.id
+                k.assigned_at = datetime.now(timezone.utc)
+                assigned_keywords.append(k)
+        
+        if assigned_keywords:
+            db.session.commit()
+    else:
+        # Fallback to Supabase RPC
+        result = db.session.execute(text("SELECT * FROM claim_keyword_batch(:wid, :bsize)"), 
+                                    {"wid": ak.id, "bsize": batch_size})
+        assigned_keywords = result.fetchall()
+        db.session.commit()
+        
+        # Note: If sqlite locally, claim_keyword_batch doesn't exist, we must use a programmatic lock
+        if 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI'] and not assigned_keywords:
+            kws = Keyword.query.filter_by(status='pending').limit(batch_size).all()
+            for k in kws:
+                k.status = 'assigned'
+                k.assigned_to = ak.id
+                k.assigned_at = datetime.now(timezone.utc)
+                assigned_keywords.append(k)
+            db.session.commit()
+
+    return jsonify({"keywords": [{"id": k.id if hasattr(k, 'id') else k[0], "keyword_text": k.keyword_text if hasattr(k, 'keyword_text') else k[1]} for k in assigned_keywords]})
+
+@app.route('/api/batch/leads', methods=['POST'])
+@require_key
+def batch_leads():
+    ak = request.access_key
+    data = request.json or {}
+    batch_size = min(int(data.get('batch_size', 5)), 20)
+    
+    existing = Lead.query.filter_by(assigned_to=ak.id, status='assigned').all()
+    if existing:
+        return jsonify({"leads": [{"id": l.id, "name": l.name, "website": l.website, "phone": l.phone, "address": l.address} for l in existing]})
+        
+    assigned_leads = []
+    
+    if USE_REDIS:
+        for _ in range(batch_size):
+            l_id = redis_client.lpop("queue:leads")
+            if not l_id: break
+            
+            l = Lead.query.get(int(l_id))
+            if l and l.status == 'new':
+                l.status = 'assigned'
+                l.assigned_to = ak.id
+                l.assigned_at = datetime.now(timezone.utc)
+                assigned_leads.append(l)
+        if assigned_leads:
+            db.session.commit()
+    else:
+        # Fallback to Supabase RPC
+        result = db.session.execute(text("SELECT * FROM claim_lead_batch(:wid, :bsize)"), 
+                                    {"wid": ak.id, "bsize": batch_size})
+        assigned_leads = result.fetchall()
+        db.session.commit()
+        
+        if 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI'] and not assigned_leads:
+            lds = Lead.query.filter_by(status='new').limit(batch_size).all()
+            for l in lds:
+                l.status = 'assigned'
+                l.assigned_to = ak.id
+                l.assigned_at = datetime.now(timezone.utc)
+                assigned_leads.append(l)
+            db.session.commit()
+
+    # Format output handling mapping whether it's an object or tuple from raw SQL
+    res = []
+    for l in assigned_leads:
+        res.append({
+            "id": l.id if hasattr(l, 'id') else l[0],
+            "name": l.name if hasattr(l, 'name') else l[1],
+            "website": l.website if hasattr(l, 'website') else l[3],
+            "phone": l.phone if hasattr(l, 'phone') else l[2],
+            "address": l.address if hasattr(l, 'address') else l[4]
+        })
+    return jsonify({"leads": res})
+
+@app.route('/api/batch/results', methods=['POST'])
+@require_key
+def batch_results():
+    ak = request.access_key
+    data = request.json or {}
+    results = data.get('results', [])
+    completed_ids = data.get('completed_keyword_ids', [])
+    
+    # Process the scraped leads and insert them into the Leads table queue
+    inserted_leads = []
+    for r in results:
+        # Deduplication could be done here (check domain/phone)
+        domain = r.get('website', '').replace('https://','').replace('http://','').strip('/')
+        if not domain: continue
+        
+        # Avoid duplicate domain insertion (Basic check)
+        exists = Lead.query.filter(Lead.website.ilike(f'%{domain}%')).first()
+        if not exists:
+            new_lead = Lead(name=r.get('name'), phone=r.get('phone'), website=r.get('website'), address=r.get('address'), keyword_source=r.get('keyword_source'), status='new')
+            db.session.add(new_lead)
+            inserted_leads.append(new_lead)
+    
+    db.session.commit() # commit so they get IDs
+    
+    # Push to Redis queue for outreach
+    if USE_REDIS and inserted_leads:
+        for l in inserted_leads:
+            redis_client.rpush("queue:leads", l.id)
+            
+    # Mark keywords as completed & Credit worker
+    for kid in completed_ids:
+        kw = Keyword.query.filter_by(id=kid, assigned_to=ak.id).first()
+        if kw:
+            kw.status = 'done'
+            kw.completed_at = datetime.now(timezone.utc)
+            kw.result_count = len([x for x in results if x.get('keyword_source') == kw.keyword_text])
+            
+            # Credit Earnings: 50 NGN per batch
+            credit_amount = 50
+            ak.total_earnings_ngn = float(ak.total_earnings_ngn or 0) + float(credit_amount)
+            elog = EarningsLog(access_key_id=ak.id, type='keyword_batch', amount_ngn=credit_amount)
+            db.session.add(elog)
+            
+    db.session.commit()
+    return jsonify({"status": "success", "inserted": len(inserted_leads)})
+
+@app.route('/api/batch/report', methods=['POST'])
+@require_key
+def batch_report():
+    ak = request.access_key
+    data = request.json or {}
+    results = data.get('results', [])
+    
+    successes = 0
+    for r in results:
+        lead_id = r.get('lead_id')
+        status = r.get('status')
+        lead = Lead.query.filter_by(id=lead_id, assigned_to=ak.id).first()
+        if lead:
+            lead.status = status
+            lead.attempt_count += 1
+            lead.last_attempt_at = datetime.now(timezone.utc)
+            if 'SUCCESS' in status:
+                successes += 1
+                
+    # Update worker stats & earnings
+    ak.total_leads_processed += len(results)
+    ak.total_successes += successes
+    
+    # Base rate logic checking Global Settings can be added later, for now flat 250 NGN if successes > 0
+    if len(results) > 0:
+        credit_amount = 250
+        ak.total_earnings_ngn = float(ak.total_earnings_ngn or 0) + float(credit_amount)
+        elog = EarningsLog(access_key_id=ak.id, type='lead_batch', amount_ngn=credit_amount)
+        db.session.add(elog)
+        
+    db.session.commit()
+    return jsonify({"status": "success"})
+
+
+# --- Admin Endpoints ---
+
+@app.route('/api/admin/stats', methods=['GET'])
+@require_admin
+def admin_stats():
+    # Summarized stats
+    total_workers = AccessKey.query.count()
+    active_workers = AccessKey.query.filter_by(is_active=True).count()
+    total_kws = Keyword.query.count()
+    pending_kws = Keyword.query.filter_by(status='pending').count()
+    total_lds = Lead.query.count()
+    success_lds = Lead.query.filter(Lead.status.ilike('%SUCCESS%')).count()
+    
+    return jsonify({
+        "workers": {"total": total_workers, "active": active_workers},
+        "keywords": {"total": total_kws, "pending": pending_kws},
+        "leads": {"total": total_lds, "successes": success_lds}
+    })
+
+@app.route('/api/admin/notify', methods=['POST'])
+@require_admin
+def admin_notify():
+    # In a real environment, this inserts into the DB and the Realtime DB feature handles delivery
+    # Using Supabase Realtime means we just insert into `notifications` and clients listening via Postgres channel get it.
+    # So we just insert:
+    data = request.json or {}
+    new_notif = Notification(title=data.get('title', 'System Update'), body=data.get('body', ''), target=data.get('target', 'all'))
+    db.session.add(new_notif)
+    db.session.commit()
+    return jsonify({"status": "success"})
+
+@app.route('/api/admin/withdrawals', methods=['GET'])
+@require_admin
+def admin_withdrawals():
+    pending = Withdrawal.query.filter_by(status='pending').all()
+    return jsonify({"withdrawals": [{"id": w.id, "amount_ngn": float(w.amount_ngn), "access_key_id": w.access_key_id} for w in pending]})
+
+@app.route('/api/admin/withdrawals/<int:w_id>/approve', methods=['POST'])
+@require_admin
+def approve_withdrawal(w_id):
+    w = Withdrawal.query.get(w_id)
+    if w and w.status == 'pending':
+        w.status = 'approved'
+        w.processed_at = datetime.now(timezone.utc)
+        ak = AccessKey.query.get(w.access_key_id)
+        if ak:
+            ak.withdrawn_ngn = float(ak.withdrawn_ngn or 0) + float(w.amount_ngn)
+        db.session.commit()
+        return jsonify({"status": "approved"})
+    return jsonify({"error": "Invalid withdrawal"}), 400
+
+@app.route('/api/admin/earnings_rates', methods=['POST'])
+@require_admin
+def update_rates():
+    data = request.json or {}
+    rate_setting = GlobalSetting.query.get('earnings_rates')
+    if not rate_setting:
+        rate_setting = GlobalSetting(id='earnings_rates', value=data)
+        db.session.add(rate_setting)
+    else:
+        rate_setting.value = data
+    db.session.commit()
+    return jsonify({"status": "success", "rates": data})
+
+@app.route('/api/admin/bugs', methods=['GET'])
+@require_admin
+def admin_bugs():
+    bugs = BugReport.query.filter_by(status='open').all()
+    return jsonify({"bugs": [{"id": b.id, "title": b.title, "description": b.description} for b in bugs]})
+
+@app.route('/api/admin/versions', methods=['POST'])
+@require_admin
+def publish_version():
+    data = request.json or {}
+    ver = AppVersion(version_string=data['version_string'], min_required_version=data.get('min_required_version'), download_url=data.get('download_url'), changelog=data.get('changelog'))
+    db.session.add(ver)
+    db.session.commit()
+    return jsonify({"status": "published"})
+
+@app.route('/api/admin/keys', methods=['GET', 'POST'])
+@require_admin
+def admin_keys():
+    if request.method == 'POST':
+        data = request.json or {}
+        ak = AccessKey(key_value=data.get('key_value'), owner_name=data.get('owner_name', 'Unknown'))
+        db.session.add(ak)
+        db.session.commit()
+        return jsonify({"status": "success"})
+    keys = AccessKey.query.all()
+    return jsonify({"keys": [{"id": k.id, "key_value": k.key_value, "owner_name": k.owner_name, "is_active": k.is_active, "total_leads": k.total_leads_processed, "total_earnings": float(k.total_earnings_ngn or 0)} for k in keys]})
+
+@app.route('/api/admin/workers', methods=['GET'])
+@require_admin
+def admin_workers():
+    workers = AccessKey.query.all()
+    return jsonify({"workers": [{"id": w.id, "owner": w.owner_name, "last_active": w.last_active.isoformat() if w.last_active else None, "is_active": w.is_active, "is_banned": w.is_banned} for w in workers]})
+
+@app.route('/api/admin/leads', methods=['GET'])
+@require_admin
+def admin_leads():
+    # Limit to 100 for basic viewing to avoid massive payload
+    leads = Lead.query.order_by(Lead.id.desc()).limit(100).all()
+    return jsonify({"leads": [{"id": l.id, "name": l.name, "website": l.website, "status": l.status, "assigned_to": l.assigned_to} for l in leads]})
+
+@app.route('/api/admin/campaigns', methods=['GET', 'POST'])
+@require_admin
+def admin_campaigns():
+    if request.method == 'POST':
+        data = request.json or {}
+        k = Keyword(keyword_text=data.get('keyword_text'), status='pending')
+        db.session.add(k)
+        db.session.commit()
+        
+        # Add to redis queue if active
+        if USE_REDIS:
+            redis_client.rpush("queue:keywords", k.id)
+            
+        return jsonify({"status": "success"})
+    kws = Keyword.query.order_by(Keyword.id.desc()).limit(100).all()
+    return jsonify({"campaigns": [{"id": k.id, "keyword_text": k.keyword_text, "status": k.status, "result_count": k.result_count} for k in kws]})
+
+@app.route('/api/admin/settings', methods=['GET', 'POST'])
+@require_admin
+def admin_settings():
+    if request.method == 'POST':
+        data = request.json or {}
+        for key, val in data.items():
+            s = GlobalSetting.query.get(key)
+            if not s:
+                s = GlobalSetting(id=key, value=val)
+                db.session.add(s)
+            else:
+                s.value = val
+        db.session.commit()
+        return jsonify({"status": "success"})
+    
+    settings = GlobalSetting.query.all()
+    return jsonify({"settings": {s.id: s.value for s in settings}})
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)

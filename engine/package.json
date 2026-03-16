@@ -1,0 +1,14 @@
+{
+  "name": "cmining-engine",
+  "version": "1.0.0",
+  "description": "Worker Engines for CMining Tool",
+  "main": "outreach.js",
+  "scripts": {
+    "start-outreach": "node outreach.js",
+    "start-scraper": "node scraper.js"
+  },
+  "dependencies": {
+    "playwright": "^1.42.1",
+    "node-html-parser": "^6.1.13"
+  }
+}
