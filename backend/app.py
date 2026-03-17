@@ -164,6 +164,14 @@ def require_admin(f):
     return decorated_function
 
 
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "online",
+        "message": "CMining Backend is running correctly",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+
 # --- Public / Worker Endpoints ---
 
 @app.route('/api/validate', methods=['POST'])

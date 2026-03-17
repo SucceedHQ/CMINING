@@ -2,7 +2,8 @@ const { app, BrowserWindow, ipcMain, Notification } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
-const http = require('http'); // For making api requests
+const http = require('http');
+const https = require('https'); // Added for cloud server support
 
 let mainWindow;
 let activeProcess = null;
@@ -58,30 +59,48 @@ function determineMode() {
     }
 }
 
+
 function requestBackend(endpoint, method = 'POST', data = null, accessKey = null) {
     return new Promise((resolve, reject) => {
         const url = new URL(endpoint, BACKEND_URL);
-        const req = http.request(url, {
+        const protocol = url.protocol === 'https:' ? https : http;
+        
+        const options = {
             method: method,
             headers: {
                 'Content-Type': 'application/json',
                 'X-Access-Key': accessKey || ''
-            }
-        }, (res) => {
+            },
+            timeout: 10000
+        };
+
+        const req = protocol.request(url, options, (res) => {
             let body = '';
             res.on('data', chunk => body += chunk);
             res.on('end', () => {
                 if(res.statusCode >= 200 && res.statusCode < 300) {
-                    try { resolve(JSON.parse(body)); } catch(e) { resolve(body); }
+                    try { 
+                        resolve(body ? JSON.parse(body) : {}); 
+                    } catch(e) { 
+                        resolve(body); 
+                    }
                 } else {
-                    reject(`HTTP ${res.statusCode}: ${body}`);
+                    reject(`Server error (HTTP ${res.statusCode}): ${body || 'No detail provided'}`);
                 }
             });
         });
-        req.on('error', reject);
-        if (data) {
-            req.write(JSON.stringify(data));
-        }
+
+        req.on('timeout', () => {
+            req.destroy();
+            reject('Request timed out. Check your connection to the server.');
+        });
+
+        req.on('error', (err) => {
+            console.error("Request Error:", err);
+            reject(`Connection failed: ${err.message}`);
+        });
+
+        if (data) req.write(JSON.stringify(data));
         req.end();
     });
 }
@@ -198,7 +217,7 @@ ipcMain.handle('validate-key', async (event, key) => {
     try {
         await requestBackend('/api/version/check', 'GET', null, null);
     } catch(e) {
-        return { success: false, error: `Cannot reach the server at ${BACKEND_URL}. Make sure the backend is running.` };
+        return { success: false, error: `CONNECTION ERROR: ${e}. (URL: ${BACKEND_URL})` };
     }
 
     try {
@@ -213,7 +232,7 @@ ipcMain.handle('validate-key', async (event, key) => {
         return { success: true, owner: res.owner };
     } catch (error) {
         const msg = typeof error === 'string' ? error : error.message || 'Invalid access key or server error.';
-        return { success: false, error: msg };
+        return { success: false, error: `AUTH ERROR (${BACKEND_URL}): ${msg}` };
     }
 });
 
