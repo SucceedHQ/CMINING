@@ -164,13 +164,88 @@ def require_admin(f):
     return decorated_function
 
 
+
 @app.route('/')
 def home():
-    return jsonify({
-        "status": "online",
-        "message": "CMining Backend is running correctly",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    })
+    # Attempt to create tables on every home visit just in case of environment migration
+    try:
+        db.create_all()
+    except Exception as e:
+        app.logger.error(f"Table creation failed: {e}")
+
+    # Simple Stat Gathering for Dashboard
+    try:
+        worker_count = AccessKey.query.count()
+        lead_count = Lead.query.count()
+        kw_count = Keyword.query.count()
+    except:
+        worker_count = lead_count = kw_count = 0
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>CMining Backend | Status</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+        <style>
+            body {{ font-family: 'Inter', sans-serif; }}
+            .glass {{ background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); }}
+        </style>
+    </head>
+    <body class="bg-slate-950 text-slate-200 min-h-screen flex items-center justify-center p-6">
+        <div class="max-w-4xl w-full">
+            <div class="glass border border-slate-800 rounded-3xl p-8 md:p-12 shadow-2xl">
+                <div class="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-12">
+                    <div>
+                        <h1 class="text-4xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent mb-2">
+                            CMining System Online
+                        </h1>
+                        <p class="text-slate-400">Server is running correctly on PythonAnywhere.</p>
+                    </div>
+                    <div class="flex items-center gap-2 bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-full border border-emerald-500/20">
+                        <span class="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></span>
+                        <span class="text-sm font-semibold uppercase tracking-wider">Active</span>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+                    <div class="bg-slate-900/50 border border-slate-800 p-6 rounded-2xl">
+                        <p class="text-slate-500 text-sm font-medium mb-1">Total Workers</p>
+                        <p class="text-3xl font-bold">{worker_count}</p>
+                    </div>
+                    <div class="bg-slate-900/50 border border-slate-800 p-6 rounded-2xl">
+                        <p class="text-slate-500 text-sm font-medium mb-1">Leads Found</p>
+                        <p class="text-3xl font-bold text-blue-400">{lead_count}</p>
+                    </div>
+                    <div class="bg-slate-900/50 border border-slate-800 p-6 rounded-2xl">
+                        <p class="text-slate-500 text-sm font-medium mb-1">Keywords</p>
+                        <p class="text-3xl font-bold text-emerald-400">{kw_count}</p>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <div class="p-4 bg-slate-900/30 rounded-xl border border-slate-800 flex items-center justify-between">
+                        <span class="text-slate-400">API Endpoint</span>
+                        <code class="text-blue-400 text-sm">/api/version/check</code>
+                    </div>
+                    <div class="p-4 bg-slate-900/30 rounded-xl border border-slate-800 flex items-center justify-between">
+                        <span class="text-slate-400">Server Time</span>
+                        <span class="text-sm font-mono text-slate-500">{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC</span>
+                    </div>
+                </div>
+
+                <div class="mt-12 text-center">
+                    <p class="text-xs text-slate-600 uppercase tracking-tighter">Powered by Antigravity AI Engine</p>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
 
 # --- Public / Worker Endpoints ---
 
@@ -192,16 +267,20 @@ def validate():
 
 @app.route('/api/version/check', methods=['GET'])
 def check_version():
-    client_version = request.args.get('version', '0.0.0')
-    latest = AppVersion.query.order_by(AppVersion.id.desc()).first()
-    if latest:
-        return jsonify({
-            "latest_version": latest.version_string,
-            "min_required_version": latest.min_required_version,
-            "is_obsolete": latest.is_obsolete,
-            "download_url": latest.download_url,
-            "changelog": latest.changelog
-        })
+    try:
+        client_version = request.args.get('version', '0.0.0')
+        latest = AppVersion.query.order_by(AppVersion.id.desc()).first()
+        if latest:
+            return jsonify({
+                "latest_version": latest.version_string,
+                "min_required_version": latest.min_required_version,
+                "is_obsolete": latest.is_obsolete,
+                "download_url": latest.download_url,
+                "changelog": latest.changelog
+            })
+    except Exception as e:
+        app.logger.error(f"Version check DB error: {e}")
+    
     return jsonify({"is_obsolete": False, "latest_version": "1.0.0"})
 
 @app.route('/api/heartbeat', methods=['POST'])

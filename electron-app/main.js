@@ -71,7 +71,8 @@ function requestBackend(endpoint, method = 'POST', data = null, accessKey = null
                 'Content-Type': 'application/json',
                 'X-Access-Key': accessKey || ''
             },
-            timeout: 10000
+            timeout: 15000,
+            family: 4 // Force IPv4 to avoid AggregateError on some systems
         };
 
         const req = protocol.request(url, options, (res) => {
@@ -85,19 +86,25 @@ function requestBackend(endpoint, method = 'POST', data = null, accessKey = null
                         resolve(body); 
                     }
                 } else {
-                    reject(`Server error (HTTP ${res.statusCode}): ${body || 'No detail provided'}`);
+                    reject(`SERVER_ERROR: HTTP ${res.statusCode} (Look at PythonAnywhere error logs)`);
                 }
             });
         });
 
         req.on('timeout', () => {
             req.destroy();
-            reject('Request timed out. Check your connection to the server.');
+            reject('TIMEOUT: Server at PythonAnywhere took too long to respond.');
         });
 
         req.on('error', (err) => {
-            console.error("Request Error:", err);
-            reject(`Connection failed: ${err.message}`);
+            console.error("Connection Error Detail:", err);
+            // Translate common codes
+            let hint = err.code;
+            if (err.code === 'ECONNREFUSED') hint = 'Connection Refused (Server is DOWN)';
+            if (err.code === 'ENOTFOUND') hint = 'Domain not found (Check your internet)';
+            if (err.name === 'AggregateError') hint = 'Network DNS Error (Node.js failed to resolve PythonAnywhere)';
+            
+            reject(`CONNECTION_FAILED: ${hint} (${err.message})`);
         });
 
         if (data) req.write(JSON.stringify(data));
