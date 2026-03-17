@@ -1,0 +1,6 @@
+RUN IN CMD OR POWERSHELL
+npm run dev
+
+
+OPEN IN BROWSER
+http://localhost:5173
