@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, Notification, net } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -63,52 +63,40 @@ function determineMode() {
 function requestBackend(endpoint, method = 'POST', data = null, accessKey = null) {
     return new Promise((resolve, reject) => {
         const url = new URL(endpoint, BACKEND_URL);
-        const protocol = url.protocol === 'https:' ? https : http;
         
-        const options = {
+        const request = net.request({
             method: method,
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Access-Key': accessKey || ''
-            },
-            timeout: 15000,
-            family: 4 // Force IPv4 to avoid AggregateError on some systems
-        };
+            url: url.toString(),
+            useSessionCookies: false
+        });
 
-        const req = protocol.request(url, options, (res) => {
+        request.setHeader('Content-Type', 'application/json');
+        if (accessKey) {
+            request.setHeader('X-Access-Key', accessKey);
+        }
+
+        request.on('response', (response) => {
             let body = '';
-            res.on('data', chunk => body += chunk);
-            res.on('end', () => {
-                if(res.statusCode >= 200 && res.statusCode < 300) {
-                    try { 
-                        resolve(body ? JSON.parse(body) : {}); 
-                    } catch(e) { 
-                        resolve(body); 
-                    }
+            response.on('data', (chunk) => {
+                body += chunk.toString();
+            });
+            response.on('end', () => {
+                if (response.statusCode >= 200 && response.statusCode < 300) {
+                    try { resolve(body ? JSON.parse(body) : {}); }
+                    catch(e) { resolve(body); }
                 } else {
-                    reject(`SERVER_ERROR: HTTP ${res.statusCode} (Look at PythonAnywhere error logs)`);
+                    reject(`SERVER_ERROR: HTTP ${response.statusCode}`);
                 }
             });
         });
 
-        req.on('timeout', () => {
-            req.destroy();
-            reject('TIMEOUT: Server at PythonAnywhere took too long to respond.');
+        request.on('error', (error) => {
+            console.error("Net Request Error:", error);
+            reject(`CONNECTION_FAILED: Native networking blocked or DNS invalid (${error.message})`);
         });
 
-        req.on('error', (err) => {
-            console.error("Connection Error Detail:", err);
-            // Translate common codes
-            let hint = err.code;
-            if (err.code === 'ECONNREFUSED') hint = 'Connection Refused (Server is DOWN)';
-            if (err.code === 'ENOTFOUND') hint = 'Domain not found (Check your internet)';
-            if (err.name === 'AggregateError') hint = 'Network DNS Error (Node.js failed to resolve PythonAnywhere)';
-            
-            reject(`CONNECTION_FAILED: ${hint} (${err.message})`);
-        });
-
-        if (data) req.write(JSON.stringify(data));
-        req.end();
+        if (data) request.write(JSON.stringify(data));
+        request.end();
     });
 }
 

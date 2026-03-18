@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 import axios from 'axios';
 
-const BACKEND_URL = 'http://localhost:5000';
+const BACKEND_URL = 'https://succeedhq.pythonanywhere.com';
 
 function SidebarItem({ icon: Icon, label, isActive, onClick }: any) {
   return (
@@ -26,6 +26,38 @@ export default function App() {
   
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+
+  // Modal State handling
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalType, setModalType] = useState('');
+  const [modalInput1, setModalInput1] = useState('');
+  const [modalInput2, setModalInput2] = useState('');
+
+  const openModal = (type: string) => {
+    setModalType(type);
+    setModalInput1('');
+    setModalInput2('');
+    setModalOpen(true);
+  };
+
+  const handleCreate = async () => {
+    try {
+      const endpoint = modalType === 'keys' ? '/api/admin/keys' : '/api/admin/campaigns';
+      const payload = modalType === 'keys' ? { key_value: modalInput1, owner_name: modalInput2 } : { keyword_text: modalInput1 };
+      
+      await axios.post(`${BACKEND_URL}${endpoint}`, payload, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      
+      setModalOpen(false);
+      // Hack to force data refresh
+      const curr = activeTab;
+      setActiveTab('analytics');
+      setTimeout(() => setActiveTab(curr), 50);
+    } catch (err: any) {
+      alert('Error creating record: ' + (err.response?.data?.error || err.message));
+    }
+  };
 
   useEffect(() => {
     if (!adminToken) return;
@@ -136,7 +168,7 @@ export default function App() {
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-2xl font-semibold text-gray-900">{tabs.find(t => t.id === activeTab)?.label}</h2>
           {['keys', 'campaigns'].includes(activeTab) && (
-            <button className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
+            <button onClick={() => openModal(activeTab)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
               <Plus size={16} /> Add New
             </button>
           )}
@@ -181,6 +213,54 @@ export default function App() {
           </>
         )}
       </div>
+
+      {modalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-96 max-w-[90%] fade-in">
+            <h3 className="text-xl font-bold mb-4 text-gray-900 border-b pb-2">
+              Add New {modalType === 'keys' ? 'Access Key' : 'Campaign Keyword'}
+            </h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {modalType === 'keys' ? 'Key Value (e.g. JUDD-123)' : 'Keyword Text (e.g. Plumbers in NY)'}
+                </label>
+                <input 
+                  type="text" 
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" 
+                  value={modalInput1} 
+                  onChange={e => setModalInput1(e.target.value)} 
+                  placeholder={modalType === 'keys' ? 'Enter random secure key' : 'Enter target search phrase'}
+                />
+              </div>
+              {modalType === 'keys' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Owner Name (Worker Identifier)</label>
+                  <input 
+                    type="text" 
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" 
+                    value={modalInput2} 
+                    onChange={e => setModalInput2(e.target.value)} 
+                    placeholder="e.g. John Doe - Remote"
+                  />
+                </div>
+              )}
+              <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
+                <button onClick={() => setModalOpen(false)} className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md transition-colors">
+                  Cancel
+                </button>
+                <button 
+                  onClick={handleCreate} 
+                  disabled={!modalInput1} 
+                  className="px-4 py-2 bg-indigo-600 disabled:opacity-50 text-white text-sm font-medium rounded-md hover:bg-indigo-700 transition-colors"
+                >
+                  Create Now
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
