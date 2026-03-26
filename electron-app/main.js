@@ -14,7 +14,7 @@ let currentKey = null;
 const CONFIG_PATH = path.join(app.getPath('userData'), 'cmining_config.json');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'cmining_settings.json');
 const ENGINE_PATH = app.isPackaged ? path.join(process.resourcesPath, 'engine') : path.join(__dirname, '..', 'engine');
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.4.1";
 
 // Load backend URL from editable settings file
 function getBackendUrl() {

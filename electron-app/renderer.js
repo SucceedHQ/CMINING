@@ -307,8 +307,10 @@ ipcRenderer.on('notification', (event, n) => {
 });
 
 ipcRenderer.on('stats-update', (event, stats) => {
-    balanceValEl.innerText = `${Number(stats.earnings).toLocaleString()} NGN`;
-    pendingValEl.innerText = `${Number(stats.pending_withdrawals).toLocaleString()} NGN`;
+    const rawEarnings = stats.earnings || stats.balance || 0;
+    const rawPending = stats.pending_withdrawals || stats.pending || 0;
+    balanceValEl.innerText = `${Number(rawEarnings).toLocaleString()} NGN`;
+    pendingValEl.innerText = `${Number(rawPending).toLocaleString()} NGN`;
 });
 
 // Auto-login

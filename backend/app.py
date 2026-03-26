@@ -16,12 +16,17 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
+# Force absolute path for local.db to prevent "disappearing" data when started from different directories
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+if not os.environ.get('DATABASE_URL'):
+    app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(BASE_DIR, 'local.db')}"
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL')
 
 # Fix for Windows local testing if .env has a PythonAnywhere path
 if os.name == 'nt' and app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:////home/'):
-    app.logger.warning("Detected PythonAnywhere path on Windows. Falling back to local.db.")
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local.db'
+    app.logger.warning("Detected PythonAnywhere path on Windows. Falling back to absolute local.db.")
+    app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(BASE_DIR, 'local.db')}"
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -32,12 +37,12 @@ def migrate_db():
         # 1. Ensure all tables exist
         db.create_all()
         
-        # 2. Manual column additions for SQLite/existing DBs
+        # Manual column additions for SQLite/existing DBs
         inspector = db.inspect(db.engine)
         
-        # Withdrawals fix
-        cols_w = [c['name'] for c in inspector.get_columns('withdrawals')]
         with db.engine.connect() as conn:
+            # Withdrawals fix
+            cols_w = [c['name'] for c in inspector.get_columns('withdrawals')]
             if 'bank_name' not in cols_w:
                 conn.execute(text("ALTER TABLE withdrawals ADD COLUMN bank_name TEXT"))
             if 'account_number' not in cols_w:
@@ -45,20 +50,29 @@ def migrate_db():
             if 'account_name' not in cols_w:
                 conn.execute(text("ALTER TABLE withdrawals ADD COLUMN account_name TEXT"))
             
-            # AccessKeys fix
+            # AccessKeys earnings fix
             cols_ak = [c['name'] for c in inspector.get_columns('access_keys')]
-            if 'bank_name' not in cols_ak:
-                conn.execute(text("ALTER TABLE access_keys ADD COLUMN bank_name TEXT"))
-            if 'account_number' not in cols_ak:
-                conn.execute(text("ALTER TABLE access_keys ADD COLUMN account_number TEXT"))
-            if 'account_name' not in cols_ak:
-                conn.execute(text("ALTER TABLE access_keys ADD COLUMN account_name TEXT"))
+            if 'total_earnings_ngn' not in cols_ak:
+                conn.execute(text("ALTER TABLE access_keys ADD COLUMN total_earnings_ngn NUMERIC DEFAULT 0"))
+            if 'withdrawn_ngn' not in cols_ak:
+                conn.execute(text("ALTER TABLE access_keys ADD COLUMN withdrawn_ngn NUMERIC DEFAULT 0"))
 
             # Keywords fix
             cols_kw = [c['name'] for c in inspector.get_columns('keywords')]
             if 'config' not in cols_kw:
-                # SQLite doesn't support JSON type natively in alter but TEXT works
                 conn.execute(text("ALTER TABLE keywords ADD COLUMN config TEXT"))
+                
+            # Leads fix
+            cols_l = [c['name'] for c in inspector.get_columns('leads')]
+            if 'project_id' not in cols_l:
+                conn.execute(text("ALTER TABLE leads ADD COLUMN project_id INTEGER"))
+            if 'sequence_step' not in cols_l:
+                conn.execute(text("ALTER TABLE leads ADD COLUMN sequence_step INTEGER DEFAULT 1"))
+            # Ensure we have at least one AppVersion entry for 1.4.1
+            v = AppVersion.query.filter_by(version_string='1.4.1').first()
+            if not v:
+                v = AppVersion(version_string='1.4.1', min_required_version='1.4.0', download_url='#', changelog='System stabilization and persistence fixes.')
+                db.session.add(v)
             
             conn.commit()
 
@@ -362,7 +376,7 @@ def request_key():
 def get_latest_version():
     latest = AppVersion.query.order_by(AppVersion.id.desc()).first()
     if not latest:
-        return jsonify({"version_string": "1.0.0", "is_force_update": False})
+        return jsonify({"version_string": "1.4.1", "is_force_update": False})
     return jsonify({
         "version_string": latest.version_string,
         "download_url": latest.download_url,
@@ -469,10 +483,19 @@ def heartbeat():
 @require_key
 def worker_stats():
     ak = request.access_key
-    pending_withdrawals = Withdrawal.query.filter_by(access_key_id=ak.id, status='pending').count()
+    # Count pending withdrawals
+    pending_count = Withdrawal.query.filter_by(access_key_id=ak.id, status='pending').count()
+    # Sum pending withdrawal amounts
+    pending_sum = db.session.query(db.func.sum(Withdrawal.amount_ngn)).filter_by(
+        access_key_id=ak.id, status='pending'
+    ).scalar() or 0
+    
+    # RESPONSE MUST MATCH Electron renderer.js EXPECTATIONS:
+    # earnings -> balance display
+    # pending_withdrawals -> pending display
     return jsonify({
-        "balance": float(ak.total_earnings_ngn - (ak.withdrawn_ngn or 0)),
-        "pending": pending_withdrawals,
+        "earnings": float((ak.total_earnings_ngn or 0) - (ak.withdrawn_ngn or 0)),
+        "pending_withdrawals": float(pending_sum),
         "successes": ak.total_successes
     })
 
@@ -563,7 +586,9 @@ def batch_leads():
         db.session.commit()
         
         if 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI'] and not assigned_leads:
-            lds = Lead.query.filter_by(status='new').limit(batch_size).all()
+            # Explicitly ONLY fetch leads that belong to a Campaign (project_id IS NOT NULL) 
+            # so we don't accidentally email raw newly scraped Map Scraper results!
+            lds = Lead.query.filter(Lead.status == 'new', Lead.project_id.is_not(None)).limit(batch_size).all()
             for l in lds:
                 l.status = 'assigned'
                 l.assigned_to = ak.id
@@ -577,15 +602,23 @@ def batch_leads():
         kw_src = l.keyword_source if hasattr(l, 'keyword_source') else l[5]
         config = {}
         if kw_src:
-            k = Keyword.query.filter_by(keyword_text=kw_src).first()
-            if k and k.config:
-                config = k.config
+            # Scraper or Outreach Check
+            # Campaigns store config in GlobalSetting
+            cfg_key = f"campaign_config_{kw_src.replace(' ', '_')}"
+            gs = GlobalSetting.query.get(cfg_key)
+            if gs and gs.value:
+                config = gs.value
+            else:
+                # Fallback to map scraper keyword (if any)
+                k = Keyword.query.filter_by(keyword_text=kw_src).first()
+                if k and k.config:
+                    config = k.config
                 
-                # LEAD EXCLUSION LOGIC
-                exclusions = config.get('exclusions', [])
-                if any(excl.lower() in (l.name or "").lower() or excl.lower() in (l.website or "").lower() for excl in exclusions):
-                    l.status = 'excluded'
-                    continue
+            # LEAD EXCLUSION LOGIC
+            exclusions = config.get('exclusions', [])
+            if any(excl.lower() in (l.name or "").lower() or excl.lower() in (l.website or "").lower() for excl in exclusions):
+                l.status = 'excluded'
+                continue
 
         res.append({
             "id": l.id if hasattr(l, 'id') else l[0],
@@ -1094,6 +1127,7 @@ def admin_campaigns():
                     website=website,
                     address=r.get('address') or r.get('Address'),
                     keyword_source=data.get('campaign_name', 'Topup'),
+                    project_id=hash(data.get('campaign_name', 'Topup')) % 999999,
                     status='new'
                 )
                 db.session.add(nl)
@@ -1107,12 +1141,13 @@ def admin_campaigns():
         db.session.commit()
         return jsonify({"status": "success", "message": "All campaign leads wiped."})
 
-    # GET: Group leads by keyword_source/campaign_name where project_id IS NOT NULL
+    # GET: Group leads by keyword_source/campaign_name
+    # Resilience: Match by keyword_source and look for any project_id link
     summary = db.session.query(
         Lead.keyword_source,
         db.func.count(Lead.id).label('total'),
-        db.func.sum(db.cast(Lead.status.ilike('%SUCCESS%'), db.Integer)).label('successes')
-    ).filter(Lead.project_id.is_not(None)).group_by(Lead.keyword_source).all()
+        db.func.sum(db.case((Lead.status.ilike('%SUCCESS%'), 1), else_=0)).label('successes')
+    ).filter(Lead.keyword_source.is_not(None)).group_by(Lead.keyword_source).all()
     
     campaigns_data = []
     for s in summary:
@@ -1146,6 +1181,10 @@ def admin_settings():
     
     settings = GlobalSetting.query.all()
     return jsonify({"settings": {s.id: s.value for s in settings}})
+
+# Final initialization
+with app.app_context():
+    migrate_db()
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
