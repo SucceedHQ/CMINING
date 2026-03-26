@@ -17,11 +17,52 @@ app = Flask(__name__)
 CORS(app)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///local.db')
+
+# Fix for Windows local testing if .env has a PythonAnywhere path
+if os.name == 'nt' and app.config['SQLALCHEMY_DATABASE_URI'].startswith('sqlite:////home/'):
+    app.logger.warning("Detected PythonAnywhere path on Windows. Falling back to local.db.")
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local.db'
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- Redis Configuration ---
+def migrate_db():
+    with app.app_context():
+        # 1. Ensure all tables exist
+        db.create_all()
+        
+        # 2. Manual column additions for SQLite/existing DBs
+        inspector = db.inspect(db.engine)
+        
+        # Withdrawals fix
+        cols_w = [c['name'] for c in inspector.get_columns('withdrawals')]
+        with db.engine.connect() as conn:
+            if 'bank_name' not in cols_w:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN bank_name TEXT"))
+            if 'account_number' not in cols_w:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN account_number TEXT"))
+            if 'account_name' not in cols_w:
+                conn.execute(text("ALTER TABLE withdrawals ADD COLUMN account_name TEXT"))
+            
+            # AccessKeys fix
+            cols_ak = [c['name'] for c in inspector.get_columns('access_keys')]
+            if 'bank_name' not in cols_ak:
+                conn.execute(text("ALTER TABLE access_keys ADD COLUMN bank_name TEXT"))
+            if 'account_number' not in cols_ak:
+                conn.execute(text("ALTER TABLE access_keys ADD COLUMN account_number TEXT"))
+            if 'account_name' not in cols_ak:
+                conn.execute(text("ALTER TABLE access_keys ADD COLUMN account_name TEXT"))
+
+            # Keywords fix
+            cols_kw = [c['name'] for c in inspector.get_columns('keywords')]
+            if 'config' not in cols_kw:
+                # SQLite doesn't support JSON type natively in alter but TEXT works
+                conn.execute(text("ALTER TABLE keywords ADD COLUMN config TEXT"))
+            
+            conn.commit()
+
+# migrate_db() will be called after models are defined.# --- Redis Configuration ---
 REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 # Allow disabling Redis in strict dev environments if not available
 USE_REDIS = os.environ.get('USE_REDIS', 'true').lower() == 'true'
@@ -64,6 +105,15 @@ class Keyword(db.Model):
     assigned_at = db.Column(db.DateTime(timezone=True))
     completed_at = db.Column(db.DateTime(timezone=True))
     result_count = db.Column(db.Integer, default=0)
+    config = db.Column(db.JSON, nullable=True) # Stores Campaign settings (Address, Email, etc)
+
+class KeyRequest(db.Model):
+    __tablename__ = 'key_requests'
+    id = db.Column(db.Integer, primary_key=True)
+    worker_name = db.Column(db.Text, nullable=True)  # Optional display name
+    contact_info = db.Column(db.Text, nullable=False)  # Email required
+    status = db.Column(db.Text, default='pending')
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class Lead(db.Model):
     __tablename__ = 'leads'
@@ -104,6 +154,9 @@ class Withdrawal(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     access_key_id = db.Column(db.Integer, db.ForeignKey('access_keys.id'), nullable=False)
     amount_ngn = db.Column(db.Numeric, nullable=False)
+    bank_name = db.Column(db.Text)
+    account_number = db.Column(db.Text)
+    account_name = db.Column(db.Text)
     status = db.Column(db.Text, default='pending')
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     processed_at = db.Column(db.DateTime(timezone=True))
@@ -167,11 +220,21 @@ def require_admin(f):
 
 @app.route('/')
 def home():
+    # Performance check & Optional wipe trigger
+    # Usage: visit /?wipe_keywords=token (token is a safety measure)
+    if request.args.get('wipe_keywords') == 'confirm':
+        try:
+            Keyword.query.delete()
+            db.session.commit()
+            return "SUCCESS: All keywords wiped."
+        except Exception as e:
+            return f"ERROR: {e}"
+
     # Attempt to create tables on every home visit just in case of environment migration
     try:
         db.create_all()
     except Exception as e:
-        app.logger.error(f"Table creation failed: {e}")
+        app.logger.error(f"Table check failed: {e}")
 
     # Simple Stat Gathering for Dashboard
     try:
@@ -251,19 +314,128 @@ def home():
 
 @app.route('/api/validate', methods=['POST'])
 def validate():
-    data = request.json or {}
-    key_val = data.get('access_key')
-    if not key_val:
-        return jsonify({"error": "Missing access key"}), 400
-    
-    ak = AccessKey.query.filter_by(key_value=key_val).first()
-    if not ak or not ak.is_active or ak.is_banned:
-        return jsonify({"error": "Invalid access key"}), 403
+    try:
+        data = request.json or {}
+        key_val = data.get('access_key')
+        if not key_val:
+            return jsonify({"error": "Missing access key"}), 400
         
-    ak.last_active = datetime.now(timezone.utc)
+        ak = AccessKey.query.filter_by(key_value=key_val).first()
+        if not ak:
+            return jsonify({"error": "Invalid access key. Please check your Dashboard."}), 403
+        if ak.is_banned:
+            return jsonify({"error": "This access key has been banned. Contact administrator."}), 403
+        if not ak.is_active:
+            return jsonify({"error": "This access key is currently inactive."}), 403
+            
+        return jsonify({"status": "authorized", "owner": ak.owner_name, "worker_id": ak.id})
+    except Exception as e:
+        return jsonify({"error": f"Database error during validation: {str(e)}"}), 500
+
+@app.route('/api/request_key', methods=['POST'])
+@app.route('/api/keys/request', methods=['POST'])
+def request_key():
+    try:
+        data = request.json or {}
+        # Email is the only required field
+        c_info = data.get('contact_info') or data.get('email') or data.get('worker_name')
+        w_name = data.get('worker_name') or data.get('name') or c_info
+        
+        if not c_info:
+            return jsonify({"error": "Email address is required to request an access key."}), 400
+        
+        # Prevent duplicate pending requests for same email
+        existing = KeyRequest.query.filter_by(contact_info=c_info, status='pending').first()
+        if existing:
+            return jsonify({"status": "success", "message": "Request already submitted. Please wait for admin approval."})
+        
+        kr = KeyRequest(worker_name=w_name, contact_info=c_info)
+        db.session.add(kr)
+        db.session.commit()
+        return jsonify({"status": "success", "message": "Access Key requested. You will be contacted at your email."})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"KeyRequest error: {e}")
+        return jsonify({"error": "Failed to store request. Please try again."}), 500
+
+@app.route('/api/worker/version', methods=['GET'])
+def get_latest_version():
+    latest = AppVersion.query.order_by(AppVersion.id.desc()).first()
+    if not latest:
+        return jsonify({"version_string": "1.0.0", "is_force_update": False})
+    return jsonify({
+        "version_string": latest.version_string,
+        "download_url": latest.download_url,
+        "changelog": latest.changelog,
+        "is_force_update": latest.is_obsolete
+    })
+
+@app.route('/api/worker/pricing', methods=['GET'])
+@require_key
+def get_pricing_for_worker():
+    rate_setting = GlobalSetting.query.get('earnings_rates')
+    rates = rate_setting.value if rate_setting else {"scraper_rate": 25, "outreach_rate": 250, "withdrawal_limit": 50000}
+    return jsonify(rates)
+
+@app.route('/api/worker/bug', methods=['POST'])
+@app.route('/api/bugs/report', methods=['POST'])
+@require_key
+def worker_bug():
+    data = request.json or {}
+    ak = request.access_key
+    bug = BugReport(access_key_id=ak.id, category=data.get('category', 'General'), 
+                    title=data.get('title', 'Bug Report'), description=data.get('description', ''))
+    db.session.add(bug)
     db.session.commit()
-    
-    return jsonify({"status": "authorized", "owner": ak.owner_name, "worker_id": ak.id})
+    return jsonify({"status": "success"})
+
+@app.route('/api/withdrawals/request', methods=['POST'])
+@require_key
+def worker_withdraw():
+    try:
+        data = request.json or {}
+        ak = request.access_key
+        amount = float(data.get('amount', 0))
+        
+        if amount <= 0:
+            return jsonify({"error": "Please enter a valid withdrawal amount."}), 400
+
+        if amount < 100000:
+            return jsonify({"error": "Minimum withdrawal amount is ₦100,000"}), 400
+
+        # Check available balance (earnings minus already withdrawn/pending amounts)
+        total_earned = float(ak.total_earnings_ngn or 0)
+        total_withdrawn = float(ak.withdrawn_ngn or 0)
+        # Also account for any currently PENDING withdrawal requests
+        pending_sum = db.session.query(db.func.sum(Withdrawal.amount_ngn)).filter_by(
+            access_key_id=ak.id, status='pending'
+        ).scalar() or 0
+        available_balance = total_earned - total_withdrawn - float(pending_sum)
+
+        if amount > available_balance:
+            return jsonify({"error": f"Insufficient balance. Available: ₦{available_balance:,.0f}"}), 400
+            
+        bank = data.get('bank', 'Unknown')
+        account = data.get('account', 'Unknown')
+        name = data.get('name', 'Unknown')
+
+        # Deduct from balance immediately when request is submitted
+        ak.withdrawn_ngn = (ak.withdrawn_ngn or 0) + amount
+        
+        w = Withdrawal(
+            access_key_id=ak.id, 
+            amount_ngn=amount,
+            bank_name=bank,
+            account_number=account,
+            account_name=name
+        )
+        db.session.add(w)
+        db.session.commit()
+        return jsonify({"status": "success", "message": f"Withdrawal request of ₦{amount:,.0f} submitted."})
+    except Exception as e:
+        db.session.rollback()
+        app.logger.error(f"Withdrawal Error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/version/check', methods=['GET'])
 def check_version():
@@ -292,6 +464,17 @@ def heartbeat():
     if USE_REDIS:
         redis_client.setex(f"worker_heartbeat:{ak.id}", 120, "alive")
     return jsonify({"status": "ok"})
+
+@app.route('/api/worker/stats', methods=['GET'])
+@require_key
+def worker_stats():
+    ak = request.access_key
+    pending_withdrawals = Withdrawal.query.filter_by(access_key_id=ak.id, status='pending').count()
+    return jsonify({
+        "balance": float(ak.total_earnings_ngn - (ak.withdrawn_ngn or 0)),
+        "pending": pending_withdrawals,
+        "successes": ak.total_successes
+    })
 
 
 # --- Batches ---
@@ -391,13 +574,32 @@ def batch_leads():
     # Format output handling mapping whether it's an object or tuple from raw SQL
     res = []
     for l in assigned_leads:
+        kw_src = l.keyword_source if hasattr(l, 'keyword_source') else l[5]
+        config = {}
+        if kw_src:
+            k = Keyword.query.filter_by(keyword_text=kw_src).first()
+            if k and k.config:
+                config = k.config
+                
+                # LEAD EXCLUSION LOGIC
+                exclusions = config.get('exclusions', [])
+                if any(excl.lower() in (l.name or "").lower() or excl.lower() in (l.website or "").lower() for excl in exclusions):
+                    l.status = 'excluded'
+                    continue
+
         res.append({
             "id": l.id if hasattr(l, 'id') else l[0],
             "name": l.name if hasattr(l, 'name') else l[1],
             "website": l.website if hasattr(l, 'website') else l[3],
             "phone": l.phone if hasattr(l, 'phone') else l[2],
-            "address": l.address if hasattr(l, 'address') else l[4]
+            "address": l.address if hasattr(l, 'address') else l[4],
+            "config": config,
+            "step": l.sequence_step if hasattr(l, 'sequence_step') else l[9] # Index 9 is sequence_step
         })
+    
+    if len(res) < len(assigned_leads):
+        db.session.commit() # save exclusions
+
     return jsonify({"leads": res})
 
 @app.route('/api/batch/results', methods=['POST'])
@@ -466,8 +668,8 @@ def batch_report():
                 successes += 1
                 
     # Update worker stats & earnings
-    ak.total_leads_processed += len(results)
-    ak.total_successes += successes
+    ak.total_leads_processed = (ak.total_leads_processed or 0) + len(results)
+    ak.total_successes = (ak.total_successes or 0) + successes
     
     # Base rate logic checking Global Settings can be added later, for now flat 250 NGN if successes > 0
     if len(results) > 0:
@@ -481,6 +683,22 @@ def batch_report():
 
 
 # --- Admin Endpoints ---
+
+@app.route('/api/notifications/active', methods=['GET'])
+@app.route('/api/worker/notifications', methods=['GET'])
+@require_key
+def worker_notifications():
+    noti = Notification.query.order_by(Notification.id.desc()).limit(10).all()
+    return jsonify([{"id": n.id, "title": n.title, "body": n.body, "created_at": n.created_at} for n in noti])
+
+@app.route('/api/admin/notifications/<int:n_id>', methods=['DELETE'])
+@require_admin
+def delete_notification(n_id):
+    n = Notification.query.get(n_id)
+    if not n: return jsonify({"error": "Not found"}), 404
+    db.session.delete(n)
+    db.session.commit()
+    return jsonify({"status": "deleted"})
 
 @app.route('/api/admin/stats', methods=['GET'])
 @require_admin
@@ -499,12 +717,48 @@ def admin_stats():
         "leads": {"total": total_lds, "successes": success_lds}
     })
 
-@app.route('/api/admin/notify', methods=['POST'])
+def auto_reclaim_stale_assignments():
+    try:
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        stale_kws = Keyword.query.filter(Keyword.status == 'assigned', Keyword.assigned_at < one_hour_ago).all()
+        for kw in stale_kws:
+            kw.status = 'pending'
+        stale_leads = Lead.query.filter(Lead.status == 'assigned', Lead.assigned_at < one_hour_ago).all()
+        for l in stale_leads:
+            l.status = 'new'
+        db.session.commit()
+    except Exception as e:
+        app.logger.error(f"Auto-reclaim error: {e}")
+
+@app.route('/api/admin/overview', methods=['GET'])
+@require_admin
+def admin_overview():
+    auto_reclaim_stale_assignments()
+    now = datetime.now(timezone.utc)
+    one_day_ago = now - timedelta(days=1)
+    
+    active_workers = AccessKey.query.filter(AccessKey.last_active > one_day_ago).count()
+    scraped_today = Lead.query.filter(Lead.created_at > one_day_ago).count()
+    successes_today = Lead.query.filter(Lead.status.ilike('%SUCCESS%'), Lead.last_attempt_at > one_day_ago).count()
+    total_earnings = db.session.query(db.func.sum(AccessKey.total_earnings_ngn)).scalar() or 0
+    pending_withdrawals = Withdrawal.query.filter_by(status='pending').count()
+    pending_keywords = Keyword.query.filter_by(status='pending').count()
+    
+    return jsonify({
+        "workers": {"active": active_workers},
+        "leads": {"total": scraped_today, "successes": successes_today},
+        "earnings": float(total_earnings),
+        "pending_withdrawals": pending_withdrawals,
+        "keywords": {"pending": pending_keywords}
+    })
+
+@app.route('/api/admin/notify', methods=['GET', 'POST'])
 @require_admin
 def admin_notify():
-    # In a real environment, this inserts into the DB and the Realtime DB feature handles delivery
-    # Using Supabase Realtime means we just insert into `notifications` and clients listening via Postgres channel get it.
-    # So we just insert:
+    if request.method == 'GET':
+        notifs = Notification.query.order_by(Notification.id.desc()).limit(50).all()
+        return jsonify({"notifications": [{"id": n.id, "title": n.title, "body": n.body, "created_at": n.created_at.isoformat() if n.created_at else None} for n in notifs]})
+    # POST - Send new notification
     data = request.json or {}
     new_notif = Notification(title=data.get('title', 'System Update'), body=data.get('body', ''), target=data.get('target', 'all'))
     db.session.add(new_notif)
@@ -514,26 +768,61 @@ def admin_notify():
 @app.route('/api/admin/withdrawals', methods=['GET'])
 @require_admin
 def admin_withdrawals():
-    pending = Withdrawal.query.filter_by(status='pending').all()
-    return jsonify({"withdrawals": [{"id": w.id, "amount_ngn": float(w.amount_ngn), "access_key_id": w.access_key_id} for w in pending]})
+    # Show all pending withdrawals with full worker details
+    pending = Withdrawal.query.filter_by(status='pending').order_by(Withdrawal.created_at.desc()).all()
+    result = []
+    for w in pending:
+        ak = AccessKey.query.get(w.access_key_id)
+        avail = float(ak.total_earnings_ngn or 0) - float(ak.withdrawn_ngn or 0) if ak else 0
+        result.append({
+            "id": w.id,
+            "amount_ngn": float(w.amount_ngn),
+            "access_key_id": w.access_key_id,
+            "owner_name": ak.owner_name if ak else 'Unknown Worker',
+            "bank_name": w.bank_name,
+            "account_number": w.account_number,
+            "account_name": w.account_name,
+            "worker_balance": avail,
+            "created_at": w.created_at.isoformat() if w.created_at else None
+        })
+    return jsonify({"withdrawals": result})
 
 @app.route('/api/admin/withdrawals/<int:w_id>/approve', methods=['POST'])
 @require_admin
 def approve_withdrawal(w_id):
+    """Approve withdrawal. Balance was already deducted at request time — nothing more to deduct."""
     w = Withdrawal.query.get(w_id)
     if w and w.status == 'pending':
         w.status = 'approved'
         w.processed_at = datetime.now(timezone.utc)
-        ak = AccessKey.query.get(w.access_key_id)
-        if ak:
-            ak.withdrawn_ngn = float(ak.withdrawn_ngn or 0) + float(w.amount_ngn)
+        # Balance was pre-deducted at request time, so no further deduction needed
         db.session.commit()
         return jsonify({"status": "approved"})
-    return jsonify({"error": "Invalid withdrawal"}), 400
+    return jsonify({"error": "Invalid or already processed withdrawal"}), 400
 
-@app.route('/api/admin/earnings_rates', methods=['POST'])
+@app.route('/api/admin/withdrawals/<int:w_id>/reject', methods=['POST'])
+@require_admin
+def reject_withdrawal(w_id):
+    """Reject withdrawal and REFUND the balance back to the worker."""
+    w = Withdrawal.query.get(w_id)
+    if w and w.status == 'pending':
+        w.status = 'rejected'
+        w.processed_at = datetime.now(timezone.utc)
+        # REFUND: add the amount back to the worker's withdrawn_ngn (reversing the deduction)
+        ak = AccessKey.query.get(w.access_key_id)
+        if ak:
+            ak.withdrawn_ngn = max(0, float(ak.withdrawn_ngn or 0) - float(w.amount_ngn))
+        db.session.commit()
+        return jsonify({"status": "rejected"})
+    return jsonify({"error": "Invalid or already processed withdrawal"}), 400
+
+@app.route('/api/admin/earnings_rates', methods=['GET', 'POST'])
 @require_admin
 def update_rates():
+    if request.method == 'GET':
+        rate_setting = GlobalSetting.query.get('earnings_rates')
+        rates = rate_setting.value if rate_setting else {"scraper_rate": 25, "outreach_rate": 250, "withdrawal_limit": 50000}
+        return jsonify({"rates": rates})
     data = request.json or {}
     rate_setting = GlobalSetting.query.get('earnings_rates')
     if not rate_setting:
@@ -544,22 +833,85 @@ def update_rates():
     db.session.commit()
     return jsonify({"status": "success", "rates": data})
 
-@app.route('/api/admin/bugs', methods=['GET'])
+@app.route('/api/admin/bugs', methods=['GET', 'DELETE'])
 @require_admin
 def admin_bugs():
+    if request.method == 'DELETE':
+        b_id = request.args.get('id')
+        if b_id:
+            BugReport.query.filter_by(id=b_id).delete()
+            db.session.commit()
+        return jsonify({"status": "deleted"})
+        
     bugs = BugReport.query.filter_by(status='open').all()
-    return jsonify({"bugs": [{"id": b.id, "title": b.title, "description": b.description} for b in bugs]})
+    return jsonify({"bugs": [{"id": b.id, "title": b.title, "description": b.description, "worker_id": b.access_key_id} for b in bugs]})
+
+@app.route('/api/admin/key_requests', methods=['GET'])
+@require_admin
+def admin_key_requests():
+    reqs = KeyRequest.query.filter_by(status='pending').all()
+    return jsonify({"requests": [{"id": r.id, "worker_name": r.worker_name, "contact_info": r.contact_info} for r in reqs]})
 
 @app.route('/api/admin/versions', methods=['POST'])
 @require_admin
 def publish_version():
     data = request.json or {}
-    ver = AppVersion(version_string=data['version_string'], min_required_version=data.get('min_required_version'), download_url=data.get('download_url'), changelog=data.get('changelog'))
+    ver = AppVersion(
+        version_string=data['version_string'], 
+        min_required_version=data.get('min_required_version'), 
+        download_url=data.get('download_url'), 
+        changelog=data.get('changelog'),
+        is_obsolete=data.get('is_obsolete', False)
+    )
     db.session.add(ver)
     db.session.commit()
     return jsonify({"status": "published"})
 
-@app.route('/api/admin/keys', methods=['GET', 'POST'])
+@app.route('/api/admin/keywords', methods=['GET', 'POST', 'DELETE'])
+@require_admin
+def admin_keywords():
+    if request.method == 'POST':
+        data = request.json or {}
+        raw_text = data.get('keyword_text', '').strip()
+        if not raw_text:
+            return jsonify({"error": "Search terms are required."}), 400
+            
+        # Handle bulk (split by newline only)
+        kws = [k.strip() for k in raw_text.split('\n') if k.strip()]
+        added = 0
+        for k_text in kws:
+            # Avoid direct duplicates in same batch
+            k = Keyword(keyword_text=k_text, status='pending', config=data.get('config', {}))
+            db.session.add(k)
+            added += 1
+        db.session.commit()
+        return jsonify({"status": "success", "added_count": added})
+
+    if request.method == 'DELETE':
+        # Wipe all keywords if purge flag is set
+        if request.args.get('purge') == 'true':
+            Keyword.query.delete()
+            db.session.commit()
+            return jsonify({"status": "success", "message": "All keywords wiped."})
+        
+        # Delete specific
+        k_id = request.args.get('id')
+        if k_id:
+            Keyword.query.filter_by(id=k_id).delete()
+            db.session.commit()
+            return jsonify({"status": "deleted"})
+            
+    # Return keywords that are NOT done (to avoid clutter)
+    keywords = Keyword.query.order_by(Keyword.id.desc()).limit(500).all()
+    pending = Keyword.query.filter_by(status='pending').count()
+    assigned = Keyword.query.filter_by(status='assigned').count()
+    done = Keyword.query.filter_by(status='done').count()
+    return jsonify({
+        "keywords": [{"id": k.id, "keyword_text": k.keyword_text, "status": k.status, "result_count": k.result_count} for k in keywords],
+        "counts": {"pending": pending, "assigned": assigned, "done": done}
+    })
+
+@app.route('/api/admin/keys', methods=['GET', 'POST', 'PUT', 'DELETE'])
 @require_admin
 def admin_keys():
     if request.method == 'POST':
@@ -568,38 +920,214 @@ def admin_keys():
         db.session.add(ak)
         db.session.commit()
         return jsonify({"status": "success"})
+    
+    if request.method == 'PUT':
+        data = request.json or {}
+        k_id = data.get('id')
+        ak = AccessKey.query.get(k_id)
+        if not ak: return jsonify({"error": "Not found"}), 404
+        if 'is_banned' in data:
+            ak.is_banned = data['is_banned']
+        if 'is_active' in data:
+            ak.is_active = data['is_active']
+        db.session.commit()
+        return jsonify({"status": "updated"})
+
+    if request.method == 'DELETE':
+        k_id = request.args.get('id')
+        ak = AccessKey.query.get(k_id)
+        if ak:
+            db.session.delete(ak)
+            db.session.commit()
+        return jsonify({"status": "deleted"})
+
     keys = AccessKey.query.all()
-    return jsonify({"keys": [{"id": k.id, "key_value": k.key_value, "owner_name": k.owner_name, "is_active": k.is_active, "total_leads": k.total_leads_processed, "total_earnings": float(k.total_earnings_ngn or 0)} for k in keys]})
+    requests_pending = KeyRequest.query.filter_by(status='pending').all()
+    return jsonify({
+        "keys": [{"id": k.id, "key_value": k.key_value, "owner_name": k.owner_name, "is_active": k.is_active, "is_banned": k.is_banned, "total_leads": k.total_successes, "total_earnings": float(k.total_earnings_ngn or 0)} for k in keys],
+        "requests": [{"id": r.id, "worker_name": r.worker_name, "contact_info": r.contact_info, "status": r.status} for r in requests_pending]
+    })
 
-@app.route('/api/admin/workers', methods=['GET'])
+@app.route('/api/admin/keys/requests/<int:r_id>/approve', methods=['POST'])
 @require_admin
-def admin_workers():
-    workers = AccessKey.query.all()
-    return jsonify({"workers": [{"id": w.id, "owner": w.owner_name, "last_active": w.last_active.isoformat() if w.last_active else None, "is_active": w.is_active, "is_banned": w.is_banned} for w in workers]})
+def approve_key_request(r_id):
+    kr = KeyRequest.query.get(r_id)
+    if not kr or kr.status != 'pending':
+        return jsonify({"error": "Invalid request"}), 400
+    
+    # Generate a random key
+    import random, string
+    new_val = "CM-" + ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    
+    ak = AccessKey(key_value=new_val, owner_name=kr.worker_name)
+    kr.status = 'approved'
+    db.session.add(ak)
+    db.session.commit()
+    return jsonify({"status": "approved", "key": new_val})
 
-@app.route('/api/admin/leads', methods=['GET'])
+@app.route('/api/admin/leads', methods=['GET', 'DELETE'])
 @require_admin
 def admin_leads():
-    # Limit to 100 for basic viewing to avoid massive payload
-    leads = Lead.query.order_by(Lead.id.desc()).limit(100).all()
-    return jsonify({"leads": [{"id": l.id, "name": l.name, "website": l.website, "status": l.status, "assigned_to": l.assigned_to} for l in leads]})
+    if request.method == 'DELETE':
+        src = request.args.get('source')
+        if src:
+            Lead.query.filter_by(keyword_source=src).delete()
+        else:
+            Lead.query.filter(Lead.project_id.is_(None)).delete()
+        db.session.commit()
+        return jsonify({"status": "cleared"})
+    
+    # Return grouped queries for Map Scraper outputs (where project_id is None)
+    summary = db.session.query(
+        db.func.date(Lead.created_at).label('date'),
+        Lead.keyword_source,
+        db.func.count(Lead.id).label('total')
+    ).filter(Lead.project_id.is_(None)).group_by(db.func.date(Lead.created_at), Lead.keyword_source).order_by(db.desc('date')).all()
+    
+    return jsonify({"grouped_leads": [{
+        "date": str(s[0]),
+        "source": s[1] or 'Unknown',
+        "count": s[2]
+    } for s in summary]})
 
-@app.route('/api/admin/campaigns', methods=['GET', 'POST'])
+@app.route('/api/admin/leads/download', methods=['GET'])
+@require_admin
+def download_leads():
+    import csv, io
+    from flask import make_response
+    src = request.args.get('source')
+    dt = request.args.get('date')
+    
+    q = Lead.query.filter(Lead.project_id.is_(None))
+    if src: q = q.filter(Lead.keyword_source == src)
+    if dt: q = q.filter(db.func.date(Lead.created_at) == dt)
+    
+    leads = q.all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['ID', 'Name', 'Phone', 'Website', 'Address', 'Keyword Source', 'Status'])
+    for l in leads:
+        writer.writerow([l.id, l.name, l.phone, l.website, l.address, l.keyword_source, l.status])
+    
+    r = make_response(output.getvalue())
+    filename = f"leads_{dt or 'all'}_{src or 'all'}.csv".replace(' ', '_')
+    r.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    r.headers["Content-type"] = "text/csv"
+    return r
+
+@app.route('/api/admin/reclaim', methods=['POST'])
+@require_admin
+def reclaim_stale():
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    
+    stale_kws = Keyword.query.filter(Keyword.status == 'assigned', Keyword.assigned_at < one_hour_ago).all()
+    for kw in stale_kws:
+        kw.status = 'pending'
+    
+    stale_leads = Lead.query.filter(Lead.status == 'assigned', Lead.assigned_at < one_hour_ago).all()
+    for l in stale_leads:
+        l.status = 'new'
+        
+    db.session.commit()
+    return jsonify({"status": "success", "reclaimed_keywords": len(stale_kws), "reclaimed_leads": len(stale_leads)})
+
+@app.route('/api/admin/campaigns', methods=['GET', 'POST', 'PUT', 'DELETE'])
 @require_admin
 def admin_campaigns():
     if request.method == 'POST':
         data = request.json or {}
-        k = Keyword(keyword_text=data.get('keyword_text'), status='pending')
-        db.session.add(k)
-        db.session.commit()
-        
-        # Add to redis queue if active
-        if USE_REDIS:
-            redis_client.rpush("queue:keywords", k.id)
+        name = data.get('name', f"Campaign {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        leads = data.get('leads', [])
+        # Config stores sub-fields: firstName, lastName, email, phone, address, city, state, zip, subject, message, sequenceSteps
+        config = data.get('config', {})
+
+        if not leads:
+            return jsonify({"error": "No leads provided. Please upload a CSV/XLSX lead file."}), 400
             
-        return jsonify({"status": "success"})
-    kws = Keyword.query.order_by(Keyword.id.desc()).limit(100).all()
-    return jsonify({"campaigns": [{"id": k.id, "keyword_text": k.keyword_text, "status": k.status, "result_count": k.result_count} for k in kws]})
+        added = 0
+        for r in leads:
+            # Avoid duplicates by website
+            website = r.get('website') or r.get('Website') or r.get('WEBSITE')
+            if website:
+                exists = Lead.query.filter_by(website=website).first()
+                if exists:
+                    continue
+            nl = Lead(
+                name=r.get('name') or r.get('Name') or r.get('NAME'),
+                phone=r.get('phone') or r.get('Phone') or r.get('PHONE'),
+                website=website,
+                address=r.get('address') or r.get('Address') or r.get('ADDRESS'),
+                keyword_source=name,
+                status='new'
+            )
+            # Attach campaign config to each lead
+            if config:
+                nl.project_id = hash(name) % 999999
+            db.session.add(nl)
+            added += 1
+
+        # Store config in a GlobalSetting by campaign name so outreach.js can use it
+        if config:
+            cfg_key = f"campaign_config_{name.replace(' ', '_')}"
+            existing_cfg = GlobalSetting.query.get(cfg_key)
+            if not existing_cfg:
+                existing_cfg = GlobalSetting(id=cfg_key, value=config)
+                db.session.add(existing_cfg)
+            else:
+                existing_cfg.value = config
+
+        db.session.commit()
+        return jsonify({"status": "success", "added_count": added})
+    
+    if request.method == 'PUT':
+        # Append leads to an existing campaign
+        data = request.json or {}
+        new_leads = data.get('append_leads', [])
+        added = 0
+        for r in new_leads:
+            website = r.get('website') or r.get('Website')
+            exists = Lead.query.filter_by(website=website).first() if website else None
+            if not exists:
+                nl = Lead(
+                    name=r.get('name') or r.get('Name'),
+                    phone=r.get('phone') or r.get('Phone'),
+                    website=website,
+                    address=r.get('address') or r.get('Address'),
+                    keyword_source=data.get('campaign_name', 'Topup'),
+                    status='new'
+                )
+                db.session.add(nl)
+                added += 1
+        db.session.commit()
+        return jsonify({"status": "success", "added_count": added})
+
+    if request.method == 'DELETE':
+        # Wipe all campaign leads
+        Lead.query.delete()
+        db.session.commit()
+        return jsonify({"status": "success", "message": "All campaign leads wiped."})
+
+    # GET: Group leads by keyword_source/campaign_name where project_id IS NOT NULL
+    summary = db.session.query(
+        Lead.keyword_source,
+        db.func.count(Lead.id).label('total'),
+        db.func.sum(db.cast(Lead.status.ilike('%SUCCESS%'), db.Integer)).label('successes')
+    ).filter(Lead.project_id.is_not(None)).group_by(Lead.keyword_source).all()
+    
+    campaigns_data = []
+    for s in summary:
+        c_name = s[0] or 'Unnamed'
+        cfg_key = f"campaign_config_{c_name.replace(' ', '_')}"
+        gs = GlobalSetting.query.get(cfg_key)
+        
+        campaigns_data.append({
+            "name": c_name,
+            "count": s[1],
+            "successes": s[2] or 0,
+            "config": gs.value if gs else None
+        })
+        
+    return jsonify({"campaigns": campaigns_data})
 
 @app.route('/api/admin/settings', methods=['GET', 'POST'])
 @require_admin

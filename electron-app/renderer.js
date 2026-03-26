@@ -1,26 +1,51 @@
 const { ipcRenderer } = require('electron');
 
+// Screens
 const loginScreen = document.getElementById('login-screen');
 const dashboardScreen = document.getElementById('dashboard-screen');
+
+// Login Elements
 const loginBtn = document.getElementById('login-btn');
 const keyInput = document.getElementById('access-key-input');
 const loginError = document.getElementById('login-error');
-const serverUrlEl = document.getElementById('server-url');
+const showRequestKeyBtn = document.getElementById('show-request-key-btn');
+
+// Dashboard Elements
 const workerNameEl = document.getElementById('worker-name');
 const terminal = document.getElementById('terminal-output');
 const activeEngineTag = document.getElementById('active-engine');
+const balanceValEl = document.getElementById('balance-val');
+const pendingValEl = document.getElementById('pending-val');
+const toggleEngineBtn = document.getElementById('toggle-engine-btn');
+const reportBtn = document.getElementById('report-btn');
+const withdrawBtn = document.getElementById('withdraw-btn');
 const logoutBtn = document.getElementById('logout-btn');
+const toggleLogsBtn = document.getElementById('toggle-logs');
+const bellBtn = document.getElementById('bell-btn');
+const notifBadge = document.getElementById('notif-badge');
+const notifModal = document.getElementById('notif-modal');
+const closeNotifBtn = document.getElementById('close-notif-btn');
+const notifList = document.getElementById('notif-list');
 
-// Show which server the app is pointed at
-ipcRenderer.invoke('get-backend-url').then(url => {
-    if (serverUrlEl) serverUrlEl.innerText = `🔗 Server: ${url}`;
-});
+// Modals
+const requestKeyModal = document.getElementById('request-key-modal');
+const bugModal = document.getElementById('bug-modal');
+const cancelReqBtn = document.getElementById('cancel-req-btn');
+const submitReqBtn = document.getElementById('submit-req-btn');
+const cancelBugBtn = document.getElementById('cancel-bug-btn');
+const submitBugBtn = document.getElementById('submit-bug-btn');
+
+const withdrawModal = document.getElementById('withdraw-modal');
+const cancelDrawBtn = document.getElementById('cancel-draw-btn');
+const submitDrawBtn = document.getElementById('submit-draw-btn');
+
+// --- Navigation & UI Logic ---
 
 function showDashboard(owner) {
     loginScreen.classList.add('hidden');
     dashboardScreen.classList.remove('hidden');
     workerNameEl.innerText = owner;
-    logToTerminal('Connected to pool. Waiting for orchestrator instructions...', '#10b981');
+    logToTerminal('Node synchronization complete. Ready to mine.', 'success');
 }
 
 function showLogin() {
@@ -29,16 +54,33 @@ function showLogin() {
     keyInput.value = '';
 }
 
-function logToTerminal(msg, color = '#10b981') {
+function logToTerminal(msg, type = 'info') {
+    // CRITICAL: Filter out connection links as per user request
+    if (msg.includes('http') || msg.includes('Connected to:')) return;
+
     const p = document.createElement('p');
     const time = new Date().toLocaleTimeString();
-    p.innerHTML = `<span style="color: #64748b;">[${time}]</span> <span style="color: ${color}">${msg}</span>`;
+    
+    // Crypto/Mining Theme Mapping
+    let displayMsg = msg;
+    if (msg.includes('Starting scraper')) displayMsg = 'Initializing block hashing engine...';
+    if (msg.includes('Starting outreach')) displayMsg = 'Synchronizing ledger entries...';
+    if (msg.includes('Success')) displayMsg = 'Block verified and committed to chain ✔';
+    if (msg.includes('Error')) displayMsg = 'Hash collision detected. Retrying...';
+
+    let typeClass = 'log-info';
+    if (type === 'success') typeClass = 'log-success';
+    if (type === 'error') typeClass = 'log-error';
+    if (type === 'msg') typeClass = 'log-msg';
+
+    p.innerHTML = `<span class="log-time">[${time}]</span> <span class="${typeClass}">${displayMsg}</span>`;
     terminal.appendChild(p);
     
-    // Auto scroll to bottom
-    if (terminal.childElementCount > 200) terminal.removeChild(terminal.firstChild);
+    if (terminal.childElementCount > 300) terminal.removeChild(terminal.firstChild);
     terminal.scrollTop = terminal.scrollHeight;
 }
+
+// --- Interactions ---
 
 loginBtn.addEventListener('click', async () => {
     const key = keyInput.value.trim();
@@ -51,7 +93,7 @@ loginBtn.addEventListener('click', async () => {
     const res = await ipcRenderer.invoke('validate-key', key);
     
     loginBtn.disabled = false;
-    loginBtn.innerText = 'Connect Wallet';
+    loginBtn.innerText = 'Connect Node';
     
     if (res.success) {
         showDashboard(res.owner);
@@ -61,37 +103,218 @@ loginBtn.addEventListener('click', async () => {
 });
 
 logoutBtn.addEventListener('click', async () => {
-    await ipcRenderer.invoke('logout');
-    showLogin();
-    terminal.innerHTML = '<p>Initializing connection to mining pool...</p>';
-});
-
-// Auto-login if key exists in config
-ipcRenderer.invoke('get-config').then(async (config) => {
-    if (config && config.accessKey) {
-        keyInput.value = config.accessKey;
-        loginBtn.click();
+    if(confirm('Disconnect from mining pool?')) {
+        await ipcRenderer.invoke('logout');
+        showLogin();
+        terminal.innerHTML = '<p><span class="log-time">></span> <span class="log-msg">Node disconnected.</span></p>';
     }
 });
 
-// IPC Listeners from main.js orchestrator
+toggleLogsBtn.addEventListener('click', () => {
+    terminal.classList.toggle('hidden');
+    toggleLogsBtn.innerText = terminal.classList.contains('hidden') ? 'Show Logs' : 'Hide Logs';
+});
+
+// Modal Logic
+showRequestKeyBtn.addEventListener('click', () => requestKeyModal.classList.remove('hidden'));
+cancelReqBtn.addEventListener('click', () => requestKeyModal.classList.add('hidden'));
+
+submitReqBtn.addEventListener('click', async () => {
+    const email = document.getElementById('req-email').value.trim();
+    
+    if (!email) return alert('Email required');
+    
+    submitReqBtn.disabled = true;
+    const res = await ipcRenderer.invoke('request-key', { email });
+    submitReqBtn.disabled = false;
+    
+    if (res.success) {
+        alert('Request submitted! We will contact you at your email. You can check the status on the Admin Dashboard.');
+        requestKeyModal.classList.add('hidden');
+    } else {
+        alert('Failed: ' + res.error);
+    }
+});
+
+reportBtn.addEventListener('click', () => bugModal.classList.remove('hidden'));
+cancelBugBtn.addEventListener('click', () => bugModal.classList.add('hidden'));
+
+submitBugBtn.addEventListener('click', async () => {
+    const desc = document.getElementById('bug-desc').value.trim();
+    if (!desc) return alert('Report description required');
+    
+    submitBugBtn.disabled = true;
+    const res = await ipcRenderer.invoke('submit-bug', { title: 'User Bug Report', desc });
+    submitBugBtn.disabled = false;
+    
+    if (res.success) {
+        alert('Bug report submitted. Thank you!');
+        bugModal.classList.add('hidden');
+        document.getElementById('bug-desc').value = '';
+    } else {
+        alert('Failed: ' + res.error);
+    }
+});
+
+bellBtn.addEventListener('click', async () => {
+    notifModal.classList.remove('hidden');
+    notifBadge.classList.add('hidden');
+    const res = await ipcRenderer.invoke('get-notifications');
+    if (res.success && res.notifications.length > 0) {
+        notifList.innerHTML = res.notifications.map(n => `
+            <div style="border-bottom: 1px solid var(--border); padding: 10px 0;">
+                <div style="font-weight: bold; color: var(--accent);">${n.title}</div>
+                <div style="font-size: 13px; color: var(--text-muted); margin-top: 4px;">${n.body}</div>
+            </div>
+        `).join('');
+    } else {
+        notifList.innerHTML = '<p style="color: var(--text-muted); text-align: center; py-10;">No active notifications.</p>';
+    }
+});
+closeNotifBtn.addEventListener('click', () => notifModal.classList.add('hidden'));
+
+withdrawBtn.addEventListener('click', () => {
+    // Fill in default amount if balance is known
+    const balVal = balanceValEl.innerText.replace('NGN', '').trim();
+    document.getElementById('draw-amount').value = balVal;
+    withdrawModal.classList.remove('hidden');
+});
+
+cancelDrawBtn.addEventListener('click', () => withdrawModal.classList.add('hidden'));
+
+submitDrawBtn.addEventListener('click', async () => {
+    const bank = document.getElementById('draw-bank').value.trim();
+    const account = document.getElementById('draw-account').value.trim();
+    const name = document.getElementById('draw-name').value.trim();
+    const amount = document.getElementById('draw-amount').value.trim();
+    const confirmKey = document.getElementById('draw-confirm-key').value.trim();
+
+    if (!bank || !account || !name || !amount || !confirmKey) {
+        return alert('All fields are required for withdrawal.');
+    }
+
+    const withdrawAmount = Number(amount);
+    const maxBalance = Number(balanceValEl.innerText.replace('NGN', '').replace(/,/g, '').trim());
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+        return alert('Please enter a valid active amount.');
+    }
+    if (withdrawAmount > maxBalance) {
+        return alert(`Insufficient balance. You can only request up to ₦${maxBalance.toLocaleString()}`);
+    }
+
+    // Check if confirmKey matches the one used to log in
+    if (confirmKey !== keyInput.value.trim()) {
+        return alert('Access Key confirmation failed. Please use your active key.');
+    }
+
+    submitDrawBtn.disabled = true;
+    const res = await ipcRenderer.invoke('request-withdrawal', { bank, account, name, amount });
+    submitDrawBtn.disabled = false;
+
+    if (res.success) {
+        alert('Withdrawal request submitted successfully!');
+        withdrawModal.classList.add('hidden');
+        // Clear fields
+        ['draw-bank', 'draw-account', 'draw-name', 'draw-amount', 'draw-confirm-key'].forEach(id => {
+            document.getElementById(id).value = '';
+        });
+    } else {
+        alert('Failed: ' + res.error);
+    }
+});
+
+toggleEngineBtn.addEventListener('click', async () => {
+    const isRunning = toggleEngineBtn.classList.contains('btn-danger'); // Danger = Stop button showing
+    
+    if (isRunning) {
+        if(confirm('Stop block hashing? Node will go idle until restarted.')) {
+            await ipcRenderer.invoke('stop-engine');
+            logToTerminal('User command: Stopping hashing blocks.', 'error');
+            setEngineUI(false);
+        }
+    } else {
+        // Since we don't have a direct "start-engine" IPC (orchestrator handles it), we just re-sync
+        const config = await ipcRenderer.invoke('get-config');
+        if (config && config.accessKey) {
+            await ipcRenderer.invoke('validate-key', config.accessKey);
+            logToTerminal('User command: Resuming mining operations.', 'info');
+            setEngineUI(true);
+        }
+    }
+});
+
+function setEngineUI(isRunning) {
+    if (isRunning) {
+        toggleEngineBtn.classList.replace('btn-outline', 'btn-danger');
+        document.getElementById('engine-icon').innerText = '■';
+        document.getElementById('engine-text').innerText = 'Stop';
+        activeEngineTag.innerText = 'Mining Blocks';
+        document.getElementById('status-container').classList.remove('hidden');
+    } else {
+        toggleEngineBtn.classList.replace('btn-danger', 'btn-outline');
+        document.getElementById('engine-icon').innerText = '▶';
+        document.getElementById('engine-text').innerText = 'Start';
+        activeEngineTag.innerText = 'Connected / Idle';
+    }
+}
+
+// --- IPC Listeners ---
+
 ipcRenderer.on('engine-log', (event, msg) => {
-    let color = '#f8fafc'; // default text
-    if (msg.includes('ERROR') || msg.includes('Fatal') || msg.includes('failed')) color = '#ef4444';
-    else if (msg.includes('✔') || msg.includes('Success')) color = '#10b981';
-    else if (msg.includes('Switching') || msg.includes('Starting')) color = '#3b82f6';
+    let type = 'msg';
+    if (msg.includes('ERROR') || msg.includes('Fatal') || msg.includes('failed')) type = 'error';
+    else if (msg.includes('✔') || msg.includes('Success')) type = 'success';
+    else if (msg.includes('Switching') || msg.includes('Starting')) type = 'info';
     
-    // Ignore boring log dumps
     if(msg.length > 200) msg = msg.substring(0, 200) + '...';
-    
-    logToTerminal(msg, color);
+    logToTerminal(msg, type);
 });
 
 ipcRenderer.on('engine-status', (event, data) => {
     if (data.status === 'starting' || data.status === 'running') {
-        const title = data.mode === 'scraper' ? 'Scraping Data...' : 'Processing Outreach...';
+        const title = data.mode === 'scraper' ? 'Hashing Blocks' : 'Mining Blocks';
         activeEngineTag.innerText = title;
+        document.getElementById('status-container').classList.remove('hidden');
     } else {
-        activeEngineTag.innerText = 'Idle / Waiting';
+        activeEngineTag.innerText = 'Connected / Idle';
+    }
+});
+
+ipcRenderer.on('update-available', (event, data) => {
+    document.getElementById('update-version').innerText = `Version: ${data.version}`;
+    document.getElementById('update-changelog').innerText = data.changelog || 'No details provided.';
+    document.getElementById('download-update-link').href = data.url;
+    
+    if (data.force) {
+        document.getElementById('force-text').style.display = 'block';
+        document.getElementById('close-update-btn').classList.add('hidden');
+    } else {
+        document.getElementById('force-text').style.display = 'none';
+        document.getElementById('close-update-btn').classList.remove('hidden');
+    }
+    
+    document.getElementById('update-modal').classList.remove('hidden');
+});
+
+document.getElementById('close-update-btn').addEventListener('click', () => {
+    document.getElementById('update-modal').classList.add('hidden');
+});
+
+ipcRenderer.on('notification', (event, n) => {
+    notifBadge.classList.remove('hidden');
+    // Also log to terminal
+    logToTerminal(`🔔 [${n.title}] ${n.body}`, 'msg');
+});
+
+ipcRenderer.on('stats-update', (event, stats) => {
+    balanceValEl.innerText = `${Number(stats.earnings).toLocaleString()} NGN`;
+    pendingValEl.innerText = `${Number(stats.pending_withdrawals).toLocaleString()} NGN`;
+});
+
+// Auto-login
+ipcRenderer.invoke('get-config').then(async (config) => {
+    if (config && config.accessKey) {
+        keyInput.value = config.accessKey;
+        // Optionally auto-click login, but better to let user see the new UI
     }
 });

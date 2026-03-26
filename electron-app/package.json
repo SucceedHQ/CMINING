@@ -1,6 +1,6 @@
 {
   "name": "cmining-worker",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "CMining Distributed Worker Node",
   "main": "main.js",
   "scripts": {
@@ -22,20 +22,29 @@
   },
   "build": {
     "appId": "com.cmining.worker",
-    "mac": {
-      "target": null
-    },
-    "linux": {
-      "target": null
+    "productName": "CMining Worker",
+    "directories": {
+      "output": "dist"
     },
     "win": {
-      "target": "portable"
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": true,
+      "createDesktopShortcut": true
     },
     "extraResources": [
       {
         "from": "../engine",
         "to": "engine",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ]
   }

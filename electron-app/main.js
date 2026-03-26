@@ -2,20 +2,21 @@ const { app, BrowserWindow, ipcMain, Notification, net } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
-const http = require('http');
-const https = require('https'); // Added for cloud server support
 
 let mainWindow;
 let activeProcess = null;
-let currentMode = null; // 'scraper' or 'outreach'
+let currentMode = null; 
 let heartbeatInterval = null;
 let engineInterval = null;
+let statsInterval = null;
+let currentKey = null;
 
 const CONFIG_PATH = path.join(app.getPath('userData'), 'cmining_config.json');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'cmining_settings.json');
 const ENGINE_PATH = app.isPackaged ? path.join(process.resourcesPath, 'engine') : path.join(__dirname, '..', 'engine');
+const APP_VERSION = "1.4.0";
 
-// Load backend URL from editable settings file (so workers can point to any server)
+// Load backend URL from editable settings file
 function getBackendUrl() {
     if (fs.existsSync(SETTINGS_PATH)) {
         try {
@@ -23,14 +24,14 @@ function getBackendUrl() {
             if (s.backend_url) return s.backend_url.replace(/\/$/, '');
         } catch(e) {}
     }
-    return process.env.BACKEND_URL || 'https://succeedhq.pythonanywhere.com';
+    return process.env.BACKEND_URL || (app.isPackaged ? 'https://succeedhq.pythonanywhere.com' : 'http://localhost:5000');
 }
 
 const BACKEND_URL = getBackendUrl();
 
 function loadConfig() {
     if (fs.existsSync(CONFIG_PATH)) {
-        return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+        try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch(e) { return {}; }
     }
     return {};
 }
@@ -40,7 +41,6 @@ function saveConfig(config) {
 }
 
 function getWATTime() {
-    // WAT is UTC+1
     const nowUtc = new Date();
     const watTime = new Date(nowUtc.getTime() + (3600000)); 
     return watTime;
@@ -49,21 +49,13 @@ function getWATTime() {
 function determineMode() {
     const wat = getWATTime();
     const hour = wat.getUTCHours();
-    
-    // 01:00 to 14:00 WAT -> Scraper
-    // 14:00 to 01:00 WAT -> Outreach
-    if (hour >= 1 && hour < 14) {
-        return 'scraper';
-    } else {
-        return 'outreach';
-    }
+    // Scraper: 01:00-14:00 | Outreach: 14:00-01:00
+    return (hour >= 1 && hour < 14) ? 'scraper' : 'outreach';
 }
-
 
 function requestBackend(endpoint, method = 'POST', data = null, accessKey = null) {
     return new Promise((resolve, reject) => {
         const url = new URL(endpoint, BACKEND_URL);
-        
         const request = net.request({
             method: method,
             url: url.toString(),
@@ -71,39 +63,53 @@ function requestBackend(endpoint, method = 'POST', data = null, accessKey = null
         });
 
         request.setHeader('Content-Type', 'application/json');
-        if (accessKey) {
-            request.setHeader('X-Access-Key', accessKey);
-        }
+        if (accessKey) request.setHeader('X-Access-Key', accessKey);
 
         request.on('response', (response) => {
             let body = '';
-            response.on('data', (chunk) => {
-                body += chunk.toString();
-            });
+            response.on('data', (chunk) => body += chunk.toString());
             response.on('end', () => {
+                let parsedBody = {};
+                try { parsedBody = body ? JSON.parse(body) : {}; } catch(e) {}
+                
                 if (response.statusCode >= 200 && response.statusCode < 300) {
-                    try { resolve(body ? JSON.parse(body) : {}); }
-                    catch(e) { resolve(body); }
+                    resolve(parsedBody);
                 } else {
-                    reject(`SERVER_ERROR: HTTP ${response.statusCode}`);
+                    const errMsg = parsedBody.error || parsedBody.message || `HTTP ${response.statusCode}`;
+                    reject(errMsg);
                 }
             });
         });
 
-        request.on('error', (error) => {
-            console.error("Net Request Error:", error);
-            reject(`CONNECTION_FAILED: Native networking blocked or DNS invalid (${error.message})`);
-        });
-
+        request.on('error', (error) => reject(error.message));
         if (data) request.write(JSON.stringify(data));
         request.end();
     });
 }
 
+function sendToRenderer(channel, payload) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(channel, payload);
+    }
+}
+
+async function updateStats(accessKey) {
+    try {
+        const stats = await requestBackend('/api/worker/stats', 'GET', null, accessKey);
+        sendToRenderer('stats-update', stats);
+    } catch(e) { console.error("Stats update failed", e); }
+}
+
+async function checkNotifications(accessKey) {
+    try {
+        config.seenNotifIds = seenIds;
+        saveConfig(config);
+    } catch(e) { console.error("Notif check failed", e); }
+}
+
 async function startEngine(mode, accessKey) {
     if (activeProcess) {
-        if (currentMode === mode) return; // Already running correct mode
-        console.log(`Switching mode from ${currentMode} to ${mode}...`);
+        if (currentMode === mode) return;
         activeProcess.kill();
         activeProcess = null;
     }
@@ -112,7 +118,6 @@ async function startEngine(mode, accessKey) {
     const scriptName = mode === 'scraper' ? 'scraper.js' : 'outreach.js';
     const scriptPath = path.join(ENGINE_PATH, scriptName);
     
-    console.log(`Starting ${scriptName}...`);
     sendToRenderer('engine-status', { mode, status: 'starting' });
 
     activeProcess = spawn('node', [scriptPath], {
@@ -131,58 +136,64 @@ async function startEngine(mode, accessKey) {
     });
 
     activeProcess.on('close', (code) => {
-        sendToRenderer('engine-log', `Process exited with code ${code}`);
         sendToRenderer('engine-status', { mode: null, status: 'stopped' });
         activeProcess = null;
         currentMode = null;
     });
 }
 
-function sendToRenderer(channel, payload) {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(channel, payload);
-    }
-}
-
-async function runHeartbeat(accessKey) {
-    try {
-        await requestBackend('/api/heartbeat', 'POST', {}, accessKey);
-        // We could also poll notifications here if Supabase Realtime isn't configured
-    } catch (e) {
-        console.error("Heartbeat failed", e);
-    }
-}
-
 function startOrchestrator(accessKey) {
+    currentKey = accessKey;
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (engineInterval) clearInterval(engineInterval);
+    if (statsInterval) clearInterval(statsInterval);
 
-    // Initial checks
-    runHeartbeat(accessKey);
-    const mode = determineMode();
-    startEngine(mode, accessKey);
-
-    heartbeatInterval = setInterval(() => runHeartbeat(accessKey), 60000);
-    
-    engineInterval = setInterval(() => {
+    const tick = () => {
+        requestBackend('/api/heartbeat', 'POST', {}, accessKey).catch(e => {});
+        checkNotifications(accessKey);
         const newMode = determineMode();
         startEngine(newMode, accessKey);
-    }, 60000);
+    };
+
+    tick();
+    updateStats(accessKey);
+    checkForUpdates(); // Function now defined below
+
+    heartbeatInterval = setInterval(tick, 60000);
+    statsInterval = setInterval(() => updateStats(accessKey), 300000); 
+    setInterval(checkForUpdates, 3600000); 
+}
+
+async function checkForUpdates() {
+    try {
+        const data = await requestBackend('/api/worker/version', 'GET');
+        if (data && data.version_string !== APP_VERSION) {
+            sendToRenderer('update-available', {
+                version: data.version_string,
+                url: data.download_url,
+                changelog: data.changelog,
+                force: data.is_force_update
+            });
+        }
+    } catch(e) { console.error("Update check failed", e); }
 }
 
 function stopOrchestrator() {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (engineInterval) clearInterval(engineInterval);
+    if (statsInterval) clearInterval(statsInterval);
     if (activeProcess) activeProcess.kill();
     activeProcess = null;
     currentMode = null;
+    currentKey = null;
 }
 
 function createWindow() {
     mainWindow = new BrowserWindow({
-        width: 1000,
-        height: 700,
-        backgroundColor: '#111827',
+        width: 1100,
+        height: 800,
+        backgroundColor: '#030712',
+        title: "CMining Worker Node",
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false
@@ -192,60 +203,74 @@ function createWindow() {
     mainWindow.loadFile('index.html');
 }
 
-app.whenReady().then(() => {
-    createWindow();
+app.whenReady().then(createWindow);
 
-    app.on('activate', function () {
-        if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    });
-});
-
-app.on('window-all-closed', function () {
+app.on('window-all-closed', () => {
     stopOrchestrator();
     if (process.platform !== 'darwin') app.quit();
 });
 
-// --- IPC Listeners ---
+// --- IPC Handlers ---
 
 ipcMain.handle('validate-key', async (event, key) => {
-    // First check backend is reachable
-    try {
-        await requestBackend('/api/version/check', 'GET', null, null);
-    } catch(e) {
-        return { success: false, error: `CONNECTION ERROR: ${e}. (URL: ${BACKEND_URL})` };
-    }
-
     try {
         const res = await requestBackend('/api/validate', 'POST', { access_key: key });
-        
         const config = loadConfig();
         config.accessKey = key;
         saveConfig(config);
-        
         startOrchestrator(key);
-        
         return { success: true, owner: res.owner };
     } catch (error) {
-        const msg = typeof error === 'string' ? error : error.message || 'Invalid access key or server error.';
-        return { success: false, error: `AUTH ERROR (${BACKEND_URL}): ${msg}` };
+        return { success: false, error: "Validation failed: " + error };
     }
 });
 
-ipcMain.handle('get-config', () => {
-    return loadConfig();
+ipcMain.handle('request-key', async (event, data) => {
+    try {
+        await requestBackend('/api/keys/request', 'POST', { email: data.email });
+        return { success: true };
+    } catch (e) { return { success: false, error: e }; }
 });
 
-ipcMain.handle('get-backend-url', () => {
-    return BACKEND_URL;
+ipcMain.handle('submit-bug', async (event, data) => {
+    if (!currentKey) return { success: false, error: "Not logged in" };
+    try {
+        await requestBackend('/api/bugs/report', 'POST', { category: 'Technical', title: data.title, description: data.desc }, currentKey);
+        return { success: true };
+    } catch (e) { return { success: false, error: e }; }
 });
 
-ipcMain.handle('logout', () => {
-    stopOrchestrator();
-    saveConfig({});
+ipcMain.handle('request-withdrawal', async (event, data) => {
+    if (!currentKey) return { success: false, error: "Not logged in" };
+    try {
+        await requestBackend('/api/withdrawals/request', 'POST', { 
+            bank: data.bank, 
+            account: data.account, 
+            name: data.name, 
+            amount: data.amount 
+        }, currentKey);
+        return { success: true };
+    } catch (e) { return { success: false, error: e }; }
+});
+
+ipcMain.handle('get-notifications', async () => {
+    if (!currentKey) return { success: false, error: "Not logged in" };
+    try {
+        const notifs = await requestBackend('/api/notifications/active', 'GET', {}, currentKey);
+        return { success: true, notifications: notifs };
+    } catch (e) { return { success: false, error: e }; }
+});
+
+ipcMain.handle('stop-engine', () => {
+    if (activeProcess) activeProcess.kill();
     return true;
 });
 
-// Notifications
-ipcMain.on('show-notification', (event, { title, body }) => {
-    new Notification({ title, body }).show();
+ipcMain.handle('get-config', loadConfig);
+ipcMain.handle('logout', () => {
+    stopOrchestrator();
+    const config = loadConfig();
+    delete config.accessKey;
+    saveConfig(config);
+    return true;
 });

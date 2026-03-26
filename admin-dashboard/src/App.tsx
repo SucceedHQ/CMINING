@@ -1,95 +1,213 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  LayoutDashboard, KeyRound, Users, UserCog, Mail, Bell, 
-  GitBranch, Bug, Settings, CircleDollarSign, LogOut, Loader2, Plus
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  LayoutDashboard, KeyRound, UserCog, Mail, Bell,
+  GitBranch, Bug, Settings, CircleDollarSign, LogOut,
+  Loader2, Plus, Download, Trash2, CheckCircle, XCircle,
+  Upload, RefreshCw, Send, Tag, Edit
 } from 'lucide-react';
 import axios from 'axios';
 
-const BACKEND_URL = 'https://succeedhq.pythonanywhere.com';
+const BACKEND_URL = (import.meta as any).env.VITE_BACKEND_URL || 'https://succeedhq.pythonanywhere.com';
 
+// ─── Sidebar Item ───────────────────────────────────────────────────
 function SidebarItem({ icon: Icon, label, isActive, onClick }: any) {
   return (
-    <div 
+    <div
       onClick={onClick}
-      className={`flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition-colors ${isActive ? 'bg-indigo-50 text-indigo-700 font-medium' : 'text-gray-600 hover:bg-gray-100'}`}
+      className={`flex items-center gap-3 px-4 py-3 rounded-lg cursor-pointer transition-colors ${isActive ? 'bg-indigo-50 text-indigo-700 font-semibold' : 'text-gray-600 hover:bg-gray-100'}`}
     >
-      <Icon size={20} className={isActive ? 'text-indigo-600' : 'text-gray-400'} />
-      <span>{label}</span>
+      <Icon size={18} className={isActive ? 'text-indigo-600' : 'text-gray-400'} />
+      <span className="text-sm">{label}</span>
     </div>
   );
 }
 
+// ─── KPI Card ──────────────────────────────────────────────────────
+function KpiCard({ title, value, color = 'text-indigo-600' }: any) {
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
+      <p className="text-sm font-medium text-gray-400 mb-1">{title}</p>
+      <p className={`text-3xl font-bold ${color}`}>{value ?? '—'}</p>
+    </div>
+  );
+}
+
+// ─── Table Layout ──────────────────────────────────────────────────
+function TableLayout({ columns, rows, actions }: any) {
+  if (!rows || rows.length === 0) {
+    return <p className="text-gray-400 text-sm mt-4">No records found.</p>;
+  }
+  return (
+    <div className="overflow-x-auto bg-white rounded-lg shadow border border-gray-200 mt-4">
+      <table className="min-w-full divide-y divide-gray-200">
+        <thead className="bg-gray-50">
+          <tr>
+            {columns.map((c: string) => (
+              <th key={c} className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">{c}</th>
+            ))}
+            {actions && <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Actions</th>}
+          </tr>
+        </thead>
+        <tbody className="bg-white divide-y divide-gray-100">
+          {rows.map((row: any, i: number) => (
+            <tr key={i} className="hover:bg-gray-50 transition-colors">
+              {Object.values(row.data || row).map((val: any, j: number) => (
+                <td key={j} className="px-4 py-3 text-sm text-gray-700 max-w-xs truncate">{String(val ?? '')}</td>
+              ))}
+              {actions && (
+                <td className="px-4 py-3">
+                  <div className="flex gap-2">{actions(row)}</div>
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Section Wrapper ───────────────────────────────────────────────
+function Section({ title, children, action }: any) {
+  return (
+    <div>
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-xl font-bold text-gray-900">{title}</h2>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ─── Main App ──────────────────────────────────────────────────────
 export default function App() {
-  const [activeTab, setActiveTab] = useState('analytics');
+  const [activeTab, setActiveTab] = useState('overview');
   const [adminToken, setAdminToken] = useState<string | null>(null);
   const [loginInput, setLoginInput] = useState('');
-  
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
 
-  // Modal State handling
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalType, setModalType] = useState('');
-  const [modalInput1, setModalInput1] = useState('');
-  const [modalInput2, setModalInput2] = useState('');
+  // Forms
+  const [keywordText, setKeywordText] = useState('');
+  const [campaignName, setCampaignName] = useState('');
+  const [campaignForm, setCampaignForm] = useState({
+    firstName: '', lastName: '', fullName: '', email: '', phone: '',
+    address: '', street: '', city: '', state: '', zipCode: '',
+    subject: '', message: '', company: ''
+  });
+  const [notifTitle, setNotifTitle] = useState('');
+  const [notifBody, setNotifBody] = useState('');
+  const [newKeyValue, setNewKeyValue] = useState('');
+  const [newKeyOwner, setNewKeyOwner] = useState('');
+  const [versionStr, setVersionStr] = useState('');
+  const [versionUrl, setVersionUrl] = useState('');
+  const [versionChangelog, setVersionChangelog] = useState('');
+  const [versionForce, setVersionForce] = useState(false);
+  const [pricingScraper, setPricingScraper] = useState('25');
+  const [pricingOutreach, setPricingOutreach] = useState('250');
+  const [pricingWithdrawLimit, setPricingWithdrawLimit] = useState('50000');
+  const [newPassword, setNewPassword] = useState('');
 
-  const openModal = (type: string) => {
-    setModalType(type);
-    setModalInput1('');
-    setModalInput2('');
-    setModalOpen(true);
+  // CMining Advanced Campaign State
+  const [editingCampaignId, setEditingCampaignId] = useState<number | null>(null);
+  const [excludeLeadsText, setExcludeLeadsText] = useState('');
+  const [campaignFile, setCampaignFile] = useState<File | null>(null);
+  const [runDate, setRunDate] = useState('');
+  const [sequenceSteps, setSequenceSteps] = useState<{delay: number, subject: string, message: string}[]>([]);
+  const [keywordPage, setKeywordPage] = useState(0);
+
+  const parseCSV = (file: File): Promise<any[]> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const text = e.target?.result as string;
+          const lines = text.split('\n').filter(l => l.replace(/,/g, '').trim());
+          if (lines.length < 2) return resolve([]);
+          const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+          const items = lines.slice(1).map(line => {
+            const vals = line.split(',').map(v => v.trim());
+            const obj: any = {};
+            headers.forEach((h, idx) => obj[h] = vals[idx]);
+            return obj;
+          });
+          resolve(items);
+        } catch(e) { reject(e); }
+      };
+      reader.onerror = () => reject("File read error");
+      reader.readAsText(file);
+    });
   };
 
-  const handleCreate = async () => {
-    try {
-      const endpoint = modalType === 'keys' ? '/api/admin/keys' : '/api/admin/campaigns';
-      const payload = modalType === 'keys' ? { key_value: modalInput1, owner_name: modalInput2 } : { keyword_text: modalInput1 };
-      
-      await axios.post(`${BACKEND_URL}${endpoint}`, payload, {
-        headers: { Authorization: `Bearer ${adminToken}` }
-      });
-      
-      setModalOpen(false);
-      // Hack to force data refresh
-      const curr = activeTab;
-      setActiveTab('analytics');
-      setTimeout(() => setActiveTab(curr), 50);
-    } catch (err: any) {
-      alert('Error creating record: ' + (err.response?.data?.error || err.message));
-    }
-  };
+  const authHeaders = { headers: { Authorization: `Bearer ${adminToken}` } };
 
-  useEffect(() => {
+  const tabs = [
+    { id: 'overview', label: 'OVERVIEW', icon: LayoutDashboard },
+    { id: 'keywords', label: 'MAP SCRAPER', icon: Tag },
+    { id: 'leads', label: 'LEAD DATABASE', icon: UserCog },
+    { id: 'campaigns', label: 'WEB OUTREACH', icon: Mail },
+    { id: 'notification', label: 'NOTIFICATIONS', icon: Bell },
+    { id: 'withdrawal', label: 'WITHDRAWALS', icon: CircleDollarSign },
+    { id: 'pricing', label: 'PRICING', icon: CircleDollarSign },
+    { id: 'version_control', label: 'VERSION CONTROL', icon: GitBranch },
+    { id: 'bug_report', label: 'BUG REPORTS', icon: Bug },
+    { id: 'settings', label: 'SETTINGS', icon: Settings },
+    { id: 'access_keys', label: 'ACCESS KEYS', icon: KeyRound },
+  ];
+
+  const STATIC_TABS = ['pricing', 'version_control', 'settings'];
+
+  const fetchData = useCallback(() => {
     if (!adminToken) return;
+    if (STATIC_TABS.includes(activeTab)) return;
+
+    let endpoint = '';
+    if (activeTab === 'overview') endpoint = '/api/admin/overview';
+    else if (activeTab === 'leads') endpoint = '/api/admin/leads';
+    else if (activeTab === 'withdrawal') endpoint = '/api/admin/withdrawals';
+    else if (activeTab === 'bug_report') endpoint = '/api/admin/bugs';
+    else if (activeTab === 'access_keys') endpoint = '/api/admin/keys';
+    else if (activeTab === 'notification') endpoint = '/api/admin/notify';
+    else if (activeTab === 'keywords') endpoint = '/api/admin/keywords';
+    else if (activeTab === 'campaigns') endpoint = '/api/admin/campaigns';
+    else return;
+
     setLoading(true);
-    let endpoint = '/api/admin/stats';
-    if(activeTab === 'keys') endpoint = '/api/admin/keys';
-    if(activeTab === 'workers') endpoint = '/api/admin/workers';
-    if(activeTab === 'leads') endpoint = '/api/admin/leads';
-    if(activeTab === 'campaigns') endpoint = '/api/admin/campaigns';
-    if(activeTab === 'notifications') endpoint = '/api/admin/notify';
-    if(activeTab === 'withdrawals') endpoint = '/api/admin/withdrawals';
-    if(activeTab === 'earnings') endpoint = '/api/admin/earnings_rates';
-    if(activeTab === 'versions') endpoint = '/api/admin/versions';
-    if(activeTab === 'bugs') endpoint = '/api/admin/bugs';
-    if(activeTab === 'settings') endpoint = '/api/admin/settings';
-
-    if (['notifications', 'earnings', 'versions'].includes(activeTab)) {
-      setLoading(false);
-      return; // these are essentially form views, not GET views
-    }
-
-    axios.get(`${BACKEND_URL}${endpoint}`, { headers: { Authorization: `Bearer ${adminToken}` } })
-      .then(res => {
-         setData(res.data);
-         setLoading(false);
-      })
-      .catch(err => {
-         console.error(err);
-         setData(null);
-         setLoading(false);
-      });
+    axios.get(`${BACKEND_URL}${endpoint}`, authHeaders)
+      .then(res => { setData(res.data); setLoading(false); })
+      .catch(() => { setData(null); setLoading(false); });
   }, [adminToken, activeTab]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Also load pricing settings when pricing tab is opened
+  useEffect(() => {
+    if (activeTab === 'pricing' && adminToken) {
+      axios.get(`${BACKEND_URL}/api/admin/earnings_rates`, authHeaders)
+        .then(res => {
+          const r = res.data?.rates || {};
+          if (r.scraper_rate) setPricingScraper(String(r.scraper_rate));
+          if (r.outreach_rate) setPricingOutreach(String(r.outreach_rate));
+          if (r.withdrawal_limit) setPricingWithdrawLimit(String(r.withdrawal_limit));
+        }).catch(() => {});
+    }
+    if (activeTab === 'keywords' && adminToken) {
+      axios.get(`${BACKEND_URL}/api/admin/keywords`, authHeaders)
+        .then(res => setData(res.data))
+        .catch(() => {});
+      setLoading(false);
+    }
+    if (activeTab === 'campaigns' && adminToken) {
+      axios.get(`${BACKEND_URL}/api/admin/campaigns`, authHeaders)
+        .then(res => setData(res.data))
+        .catch(() => {});
+    }
+  }, [activeTab, adminToken]);
+
+  const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 4000); };
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -100,16 +218,25 @@ export default function App() {
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
         <div className="sm:mx-auto sm:w-full sm:max-w-md">
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">Sign in to CMining Admin</h2>
+          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">CMining Admin</h2>
+          <p className="text-center text-sm text-gray-500 mt-2">Distributed Lead Generation Network</p>
         </div>
         <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
           <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10 border border-gray-100">
             <form onSubmit={handleLogin} className="space-y-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700">Admin Secret Key</label>
-                <input type="password" required className="mt-1 appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" value={loginInput} onChange={e => setLoginInput(e.target.value)} />
+                <input
+                  type="password" required
+                  title="Admin Secret Key"
+                  placeholder="Enter your secret key"
+                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
+                  value={loginInput} onChange={e => setLoginInput(e.target.value)}
+                />
               </div>
-              <button type="submit" className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700">Sign in</button>
+              <button type="submit" className="w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700">
+                Sign in
+              </button>
             </form>
           </div>
         </div>
@@ -117,151 +244,776 @@ export default function App() {
     );
   }
 
-  const tabs = [
-    { id: 'analytics', label: 'Analytics Charts', icon: LayoutDashboard },
-    { id: 'keys', label: 'Access Keys', icon: KeyRound },
-    { id: 'workers', label: 'Workers / Heartbeat', icon: Users },
-    { id: 'leads', label: 'Leads / Inventory', icon: UserCog },
-    { id: 'campaigns', label: 'Campaigns Editor', icon: Mail },
-    { id: 'notifications', label: 'Notifications', icon: Bell },
-    { id: 'withdrawals', label: 'Withdrawals', icon: CircleDollarSign },
-    { id: 'earnings', label: 'Earnings Rates', icon: CircleDollarSign },
-    { id: 'versions', label: 'App Versions', icon: GitBranch },
-    { id: 'bugs', label: 'Bug Reports', icon: Bug },
-    { id: 'settings', label: 'Settings', icon: Settings },
-  ];
+  // ── Section Renderers ──────────────────────────────────────────
 
-  const TableLayout = ({ columns, dataList }: any) => (
-    <div className="overflow-x-auto bg-white rounded-lg shadow border border-gray-200">
-      <table className="min-w-full divide-y divide-gray-200">
-        <thead className="bg-gray-50">
-          <tr>{columns.map((c: string) => <th key={c} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{c}</th>)}</tr>
-        </thead>
-        <tbody className="bg-white divide-y divide-gray-200">
-          {dataList?.map((row: any, i: number) => (
-             <tr key={i}>{Object.values(row).map((val: any, j: number) => <td key={j} className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{String(val)}</td>)}</tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+  const renderOverview = () => (
+    <Section title="Overview">
+      {loading ? <div className="flex justify-center p-12"><Loader2 className="animate-spin text-indigo-600" size={32} /></div> : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-4">
+          <KpiCard title="Active Workers (Today)" value={data?.workers?.active} />
+          <KpiCard title="Leads Scraped (Today)" value={data?.leads?.total} color="text-blue-600" />
+          <KpiCard title="Messages Sent (Today)" value={data?.leads?.successes} color="text-green-600" />
+          <KpiCard title="Total ₦ Earnings" value={data?.earnings ? `₦${Number(data.earnings).toLocaleString()}` : '₦0'} color="text-yellow-600" />
+          <KpiCard title="Withdrawal Requests Pending" value={data?.pending_withdrawals} color="text-red-600" />
+          <KpiCard title="Keywords in Queue" value={data?.keywords?.pending} color="text-purple-600" />
+        </div>
+      )}
+    </Section>
   );
+
+  const renderKeywords = () => {
+    const counts = data?.counts || {};
+    const keywords = (data?.keywords || []).filter((k: any) => k.status !== 'done');
+    const pageSize = 500;
+    const totalPages = Math.ceil(keywords.length / pageSize);
+    const paginatedKws = keywords.slice(keywordPage * pageSize, (keywordPage + 1) * pageSize);
+
+    return (
+      <Section title="Keywords — Target Queue" action={
+        <div className="flex items-center gap-3">
+          {totalPages > 1 && (
+            <div className="flex gap-1 mr-4">
+              {Array.from({ length: totalPages }).map((_, i) => (
+                <button 
+                  key={i} 
+                  onClick={() => setKeywordPage(i)}
+                  className={`w-8 h-8 rounded text-xs transition-colors ${keywordPage === i ? 'bg-indigo-600 text-white font-bold' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                >
+                  {i + 1}
+                </button>
+              ))}
+            </div>
+          )}
+          <button onClick={async () => {
+            setSaving(true);
+            const lines = keywordText.split('\n').map((l: string) => l.trim()).filter(Boolean);
+            let ok = 0;
+            for (const kw of lines) {
+              try {
+                await axios.post(`${BACKEND_URL}/api/admin/keywords`, { keyword_text: kw, config: {} }, authHeaders);
+                ok++;
+              } catch {}
+            }
+            setKeywordText('');
+            flash(`✅ Added ${ok} keyword(s) to queue.`);
+            setSaving(false);
+            fetchData();
+          }} disabled={!keywordText || saving} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2">
+            <Upload size={14} /> {saving ? 'Adding...' : 'Add to Queue'}
+          </button>
+        </div>
+      }>
+        <textarea
+          className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mt-2 h-28 resize-none"
+          placeholder="Paste keywords here, one per line:&#10;Plumbers in New York&#10;HVAC companies in Chicago&#10;..."
+          value={keywordText}
+          onChange={e => setKeywordText(e.target.value)}
+        />
+        <div className="flex gap-4 mt-3 text-sm">
+          <span className="px-3 py-1 bg-blue-50 text-blue-700 rounded-full font-medium">⏳ Pending: {counts.pending ?? 0}</span>
+          <span className="px-3 py-1 bg-yellow-50 text-yellow-700 rounded-full font-medium">🔄 Assigned: {counts.assigned ?? 0}</span>
+          <span className="px-3 py-1 bg-green-50 text-green-700 rounded-full font-medium">✅ Done: {counts.done ?? 0}</span>
+          <button onClick={async () => {
+            await axios.post(`${BACKEND_URL}/api/admin/reclaim`, {}, authHeaders);
+            flash('✅ Stale assignments reclaimed.');
+            fetchData();
+          }} className="ml-auto px-3 py-1 bg-orange-50 text-orange-700 border border-orange-200 rounded-full text-xs hover:bg-orange-100 flex items-center gap-1">
+            <RefreshCw size={12} /> Reset Stuck
+          </button>
+        </div>
+        <TableLayout
+          columns={['ID', 'Keyword', 'Status', 'Results']}
+          rows={paginatedKws.map((k: any) => ({ id: k.id, kw: k.keyword_text, status: k.status, res: k.result_count }))}
+        />
+        <div className="mt-4 flex justify-end px-4">
+           <button 
+             onClick={async () => {
+               if(confirm('PERMANENTLY WIPE ALL KEYWORDS from the scraper queue?')) {
+                 await axios.delete(`${BACKEND_URL}/api/admin/keywords?purge=true`, authHeaders);
+                 flash('🏁 All keywords wiped successfully.');
+                 fetchData();
+               }
+             }}
+             className="text-xs text-red-600 hover:bg-red-50 px-3 py-1.5 rounded border border-red-200 flex items-center gap-1 font-bold bg-white"
+           >
+             <Trash2 size={12} /> WIPE ALL KEYWORDS
+           </button>
+        </div>
+      </Section>
+    );
+  };
+
+  const renderLeads = () => {
+    const groupedLeads = data?.grouped_leads || [];
+    return (
+      <Section title="Lead Database — Map Scraper Output">
+        {loading ? <div className="flex justify-center p-12"><Loader2 className="animate-spin" size={28} /></div> : (
+          <div className="space-y-4">
+            {groupedLeads.length === 0 ? <p className="text-gray-500 italic text-sm">No scraper output found.</p> : null}
+            <TableLayout
+              columns={['Date', 'Keyword Source', 'Leads Found', 'Actions']}
+              rows={groupedLeads.map((l: any, idx: number) => ({
+                id: idx,
+                date: l.date,
+                source: l.source,
+                count: l.count
+              }))}
+              actions={(row: any) => (
+                <div className="flex justify-end gap-2">
+                  <a href={`${BACKEND_URL}/api/admin/leads/download?date=${row.date}&source=${encodeURIComponent(row.source)}&token=${adminToken}`} 
+                     target="_blank" className="p-1 px-2 text-green-600 hover:bg-green-50 rounded flex items-center" title="Download CSV">
+                    <Download size={16} className="mr-1" /> Download
+                  </a>
+                  <button onClick={async () => {
+                    if(confirm('Delete this scraped lead batch?')) {
+                      await axios.delete(`${BACKEND_URL}/api/admin/leads?source=${encodeURIComponent(row.source)}`, authHeaders);
+                      flash('✅ Scraper data cleared.');
+                      fetchData();
+                    }
+                  }} className="p-1 px-2 text-red-600 hover:bg-red-50 rounded flex items-center" title="Wipe Data">
+                    <Trash2 size={16} className="mr-1" /> Clear
+                  </button>
+                </div>
+              )}
+            />
+          </div>
+        )}
+      </Section>
+    );
+  };
+
+  const renderCampaigns = () => {
+    const campaigns = data?.campaigns || [];
+    return (
+      <Section title="Campaigns — Outreach Projects">
+        <div className="bg-white border border-gray-200 rounded-xl p-6 mt-4 shadow-sm">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-bold text-gray-800 text-lg">{editingCampaignId ? 'Edit Campaign' : 'Create New Campaign'}</h3>
+            {editingCampaignId && (
+              <button onClick={() => {
+                setEditingCampaignId(null);
+                setCampaignName('');
+                setCampaignForm({ firstName: '', lastName: '', fullName: '', email: '', phone: '', address: '', street: '', city: '', state: '', zipCode: '', subject: '', message: '', company: '' });
+                setSequenceSteps([]);
+                setRunDate('');
+                setExcludeLeadsText('');
+              }} className="text-sm text-indigo-600 hover:underline">Cancel Editing</button>
+            )}
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-gray-50 rounded-lg border border-gray-100">
+              <div className="md:col-span-1">
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Campaign Name / Source</label>
+                <input 
+                  type="text"
+                  title="Campaign Name"
+                  className="w-full border border-gray-300 rounded px-3 py-2 text-sm" 
+                  placeholder="e.g. Real Estate London" 
+                  value={campaignName} 
+                  onChange={e => setCampaignName(e.target.value)} 
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Scheduled Run Date</label>
+                <input type="date" title="Scheduled Run Date" className="w-full border border-gray-300 rounded px-3 py-2 text-sm" value={runDate} onChange={e => setRunDate(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Lead File (CSV/XLSX)</label>
+                <div className="flex items-center gap-2">
+                  <input 
+                    type="file" 
+                    title="Upload Lead File"
+                    className="block w-full text-xs text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100" 
+                    onChange={e => setCampaignFile(e.target.files?.[0] || null)} 
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border border-gray-100 rounded-lg">
+              <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 border-b pb-2">Sender Identity</h4>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {[
+                  ['First Name', 'firstName'], ['Last Name', 'lastName'],
+                  ['Company Name', 'company'], ['Phone Number', 'phone'],
+                  ['Email', 'email']
+                ].map(([label, field]) => (
+                  <div key={field}>
+                    <label className="block text-[10px] font-medium text-gray-400 uppercase mb-1">{label}</label>
+                    <input title={label} placeholder={label} className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm" value={(campaignForm as any)[field]} onChange={e => setCampaignForm({ ...campaignForm, [field]: e.target.value })} />
+                  </div>
+                ))}
+                <div className="md:col-span-2">
+                  <label className="block text-[10px] font-medium text-gray-400 uppercase mb-1">Address / Location</label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                    <input title="Street" placeholder="Street" className="col-span-2 border border-gray-200 rounded px-2 py-1.5 text-sm" value={campaignForm.street} onChange={e => setCampaignForm({ ...campaignForm, street: e.target.value })} />
+                    <input title="City" placeholder="City" className="border border-gray-200 rounded px-2 py-1.5 text-sm" value={campaignForm.city} onChange={e => setCampaignForm({ ...campaignForm, city: e.target.value })} />
+                    <input title="State" placeholder="State" className="border border-gray-200 rounded px-2 py-1.5 text-sm" value={campaignForm.state} onChange={e => setCampaignForm({ ...campaignForm, state: e.target.value })} />
+                    <input title="Zip Code" placeholder="Zip Code" className="border border-gray-200 rounded px-2 py-1.5 text-sm" value={campaignForm.zipCode} onChange={e => setCampaignForm({ ...campaignForm, zipCode: e.target.value })} />
+                  </div>
+                </div>
+                <div className="md:col-span-2 mt-3">
+                  <label className="block text-[10px] font-medium text-gray-400 uppercase mb-1">Email Subject Line</label>
+                  <input title="Subject" placeholder="Ex: Proposal for [BUSINESS_NAME]" className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm mb-3" value={campaignForm.subject} onChange={e => setCampaignForm({ ...campaignForm, subject: e.target.value })} />
+                  
+                  <label className="block text-[10px] font-medium text-gray-400 uppercase mb-1">Outreach Message <span className="text-indigo-400 font-semibold">(use [BUSINESS_NAME] as placeholder)</span></label>
+                  <textarea title="Main Message" placeholder="Hi [BUSINESS_NAME], I wanted to reach out regarding..." className="w-full border border-gray-200 rounded px-2 py-1.5 text-sm h-32 resize-none" value={campaignForm.message} onChange={e => setCampaignForm({ ...campaignForm, message: e.target.value })} />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-4 border border-gray-100 rounded-lg bg-indigo-50/30">
+              <h4 className="text-xs font-bold text-gray-400 uppercase mb-3 border-b pb-2 flex justify-between items-center">
+                Follow-up Pipeline
+                <button 
+                  title="Add Follow-up Step"
+                  onClick={() => setSequenceSteps([...sequenceSteps, { delay: 1, subject: '', message: '' }])} 
+                  className="p-1 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+                >
+                  <Plus size={12} />
+                </button>
+              </h4>
+              <div className="space-y-4 max-h-[300px] overflow-y-auto pr-2">
+                {sequenceSteps.length === 0 && <p className="text-gray-400 italic text-xs text-center py-8">No follow-ups scheduled.</p>}
+                {sequenceSteps.map((step, idx) => (
+                  <div key={idx} className="bg-white border border-indigo-100 rounded p-3 relative">
+                    <button 
+                      title="Remove Step"
+                      onClick={() => setSequenceSteps(sequenceSteps.filter((_, i) => i !== idx))} 
+                      className="absolute top-2 right-2 text-gray-300 hover:text-red-500"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-[10px] font-bold text-indigo-400 uppercase">Stage {idx + 1} — Delay</span>
+                      <input 
+                        type="number" 
+                        title="Delay in Days"
+                        className="w-16 border border-gray-200 rounded px-1 py-0.5 text-xs" 
+                        value={step.delay} 
+                        onChange={e => {
+                          const newSteps = [...sequenceSteps];
+                          newSteps[idx].delay = Number(e.target.value);
+                          setSequenceSteps(newSteps);
+                        }} 
+                      />
+                      <span className="text-[10px] text-gray-400">days</span>
+                    </div>
+                    <input className="w-full border border-gray-200 rounded px-2 py-1 text-xs mb-2 font-medium" placeholder="Follow-up Subject" value={step.subject} onChange={e => {
+                      const newSteps = [...sequenceSteps];
+                      newSteps[idx].subject = e.target.value;
+                      setSequenceSteps(newSteps);
+                    }} />
+                    <textarea className="w-full border border-gray-200 rounded px-2 py-1 text-xs h-16 resize-none" placeholder="Follow-up Message" value={step.message} onChange={e => {
+                      const newSteps = [...sequenceSteps];
+                      newSteps[idx].message = e.target.value;
+                      setSequenceSteps(newSteps);
+                    }} />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="md:col-span-2 p-4 bg-red-50/50 rounded-lg border border-red-100">
+               <h4 className="text-xs font-bold text-red-400 uppercase mb-2">Lead Exclusion Filter</h4>
+               <p className="text-[10px] text-gray-500 mb-2">Paste Business Names or Domains (one per line) to exclude from this campaign.</p>
+               <textarea 
+                 className="w-full border border-red-200 rounded px-3 py-2 text-sm h-20 resize-none bg-white" 
+                 placeholder="Ex: Success Corp&#10;google.com" 
+                 value={excludeLeadsText}
+                 onChange={e => setExcludeLeadsText(e.target.value)}
+               />
+             </div>
+           </div>
+
+           <button onClick={async () => {
+             setSaving(true);
+             try {
+               let leads: any[] = [];
+               if (campaignFile) {
+                 leads = await parseCSV(campaignFile);
+               }
+               
+               if (leads.length === 0) {
+                 flash('❌ Please upload a lead file with at least one record.');
+                 setSaving(false);
+                 return;
+               }
+
+               await axios.post(`${BACKEND_URL}/api/admin/campaigns`, { 
+                 name: campaignName, 
+                 leads: leads,
+                 config: {
+                   firstName: campaignForm.firstName,
+                   lastName: campaignForm.lastName,
+                   fullName: campaignForm.fullName || `${campaignForm.firstName} ${campaignForm.lastName}`.trim(),
+                   email: campaignForm.email,
+                   phone: campaignForm.phone,
+                   company: campaignForm.company,
+                   address: `${campaignForm.street}, ${campaignForm.city}, ${campaignForm.state} ${campaignForm.zipCode}`.trim().replace(/^,\s*/, ''),
+                   street: campaignForm.street,
+                   city: campaignForm.city,
+                   state: campaignForm.state,
+                   zip: campaignForm.zipCode,
+                   subject: campaignForm.subject,
+                   message: campaignForm.message,
+                   sequenceSteps: sequenceSteps
+                 }
+               }, authHeaders);
+               
+               flash('✅ New Outreach Campaign launched.');
+               setCampaignName('');
+               setCampaignFile(null);
+               setExcludeLeadsText('');
+               setCampaignForm({ firstName: '', lastName: '', fullName: '', email: '', phone: '', address: '', street: '', city: '', state: '', zipCode: '', subject: '', message: '', company: '' });
+               setSequenceSteps([]);
+               fetchData();
+             } catch (e: any) {
+               flash('❌ Error: ' + (e.response?.data?.error || e.response?.data?.message || 'Server error. Please try again.'));
+             }
+             setSaving(false);
+           }} disabled={saving || !campaignName} className="mt-6 w-full py-3 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-100 disabled:opacity-50">
+             {saving ? 'Processing...' : 'Launch New Outreach Batch'}
+           </button>
+         </div>
+
+          <div className="mt-8">
+            <h3 className="font-bold text-gray-800 mb-4">Active Outreach Campaigns</h3>
+             <TableLayout
+               columns={['Campaign Name', 'Leads Loaded', 'Successes', 'Actions']}
+              rows={campaigns.map((c: any) => ({ 
+                name: c.name, 
+                count: c.count,
+                successes: c.successes || 0
+              }))}
+             actions={(row: any) => (
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => {
+                    const c = campaigns.find((x: any) => x.name === row.name);
+                    if (c) {
+                      setEditingCampaignId(c.name);
+                      setCampaignName(c.name);
+                      if (c.config) {
+                        setCampaignForm({
+                          firstName: c.config.firstName || '',
+                          lastName: c.config.lastName || '',
+                          fullName: c.config.fullName || '',
+                          email: c.config.email || '',
+                          phone: c.config.phone || '',
+                          address: c.config.address || '',
+                          street: c.config.street || '',
+                          city: c.config.city || '',
+                          state: c.config.state || '',
+                          zipCode: c.config.zip || '',
+                          subject: c.config.subject || '',
+                          message: c.config.message || '',
+                          company: c.config.company || ''
+                        });
+                        setSequenceSteps(c.config.sequenceSteps || []);
+                      }
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                      flash('🖊️ Editing campaign details.');
+                    }
+                  }} className="p-1.5 text-indigo-600 hover:bg-indigo-50 rounded" title="Edit Campaign">
+                    <Edit size={16} />
+                  </button>
+                  <button 
+                     onClick={async () => {
+                       if(confirm(`Are you sure you want to clear campaign '${row.name}'?`)) {
+                         await axios.delete(`${BACKEND_URL}/api/admin/campaigns`, authHeaders); 
+                         flash('✅ Campaign data cleared.');
+                         fetchData();
+                       }
+                     }}
+                     className="p-1.5 text-red-600 hover:bg-red-50 rounded" title="Wipe Data"
+                  >
+                     <Trash2 size={16} />
+                  </button>
+                </div>
+             )}
+           />
+         </div>
+       </Section>
+    );
+  };
+
+  const renderNotification = () => {
+    const notifs = data?.notifications || [];
+    return (
+      <Section title="Notification — Broadcast to Workers">
+        <div className="bg-white border border-gray-200 rounded-xl p-6 mt-4">
+          <h3 className="font-semibold text-gray-800 mb-3">Send Announcement</h3>
+          <input className="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-3" placeholder="Title (e.g. System Maintenance)" value={notifTitle} onChange={e => setNotifTitle(e.target.value)} />
+          <textarea className="w-full border border-gray-300 rounded px-3 py-2 text-sm h-24 resize-none" placeholder="Notification body..." value={notifBody} onChange={e => setNotifBody(e.target.value)} />
+          <button onClick={async () => {
+            if (!notifTitle || !notifBody) { flash('Fill in both fields.'); return; }
+            setSaving(true);
+            try {
+              await axios.post(`${BACKEND_URL}/api/admin/notify`, { title: notifTitle, body: notifBody }, authHeaders);
+              setNotifTitle(''); setNotifBody('');
+              flash('✅ Notification sent to all workers.');
+              fetchData();
+            } catch { flash('❌ Failed to send.'); }
+            setSaving(false);
+          }} disabled={saving} className="mt-3 px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 flex items-center gap-2">
+            <Send size={14} /> {saving ? 'Sending...' : 'Send Now'}
+          </button>
+        </div>
+        <h3 className="font-medium text-gray-700 mt-6 mb-3">Sent Notifications</h3>
+        <TableLayout
+          columns={['ID', 'Title', 'Body', 'Sent At', 'Actions']}
+          rows={notifs.map((n: any) => ({ id: n.id, title: n.title, body: n.body?.substring(0, 60) + (n.body?.length > 60 ? '...' : ''), at: n.created_at?.split('T')[0] || '—' }))}
+          actions={(row: any) => (
+            <button 
+              title="Delete Notification"
+              onClick={async () => {
+                if(confirm('Delete this notification?')) {
+                  await axios.delete(`${BACKEND_URL}/api/admin/notifications/${row.id}`, authHeaders);
+                  flash('✅ Notification deleted.');
+                  fetchData();
+                }
+              }}
+              className="p-1 text-red-500 hover:bg-red-50 rounded"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        />
+      </Section>
+    );
+  };
+
+  const renderWithdrawal = () => {
+    const withdrawals = data?.withdrawals || [];
+    return (
+      <Section title="Withdrawal — Payout Requests">
+        {loading ? <div className="flex justify-center p-12"><Loader2 className="animate-spin" size={28} /></div> : (
+          <div className="space-y-3 mt-4">
+            {withdrawals.length === 0 && <p className="text-gray-500 text-sm">No pending withdrawal requests.</p>}
+            {withdrawals.map((w: any) => (
+              <div key={w.id} className="bg-white border border-gray-200 rounded-xl p-4 flex items-center justify-between shadow-sm">
+                <div>
+                  <p className="font-bold text-2xl text-gray-900">₦{Number(w.amount_ngn).toLocaleString()}</p>
+                  <p className="text-sm font-bold text-indigo-700 mt-1">{w.owner_name || 'Unknown Worker'}</p>
+                  <div className="mt-1 space-y-0.5">
+                    <p className="text-sm font-medium text-gray-800">Account: <span className="text-indigo-600">{w.account_name || '—'}</span></p>
+                    <p className="text-sm text-gray-600">{w.bank_name || 'Unknown Bank'} • {w.account_number || 'No Account'}</p>
+                    {w.worker_balance !== undefined && (
+                      <p className="text-xs text-gray-400">Worker Balance After: ₦{Math.max(0, Number(w.worker_balance)).toLocaleString()}</p>
+                    )}
+                    <p className="text-[11px] text-gray-400 uppercase tracking-tighter">Worker #{w.access_key_id} • {w.created_at?.split('T')[0]}</p>
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={async () => {
+                    await axios.post(`${BACKEND_URL}/api/admin/withdrawals/${w.id}/approve`, {}, authHeaders);
+                    flash(`✅ Approved ₦${Number(w.amount_ngn).toLocaleString()}`);
+                    fetchData();
+                  }} className="px-3 py-1.5 bg-green-600 text-white rounded text-sm flex items-center gap-1 hover:bg-green-700">
+                    <CheckCircle size={14} /> Approve
+                  </button>
+                  <button onClick={async () => {
+                    await axios.post(`${BACKEND_URL}/api/admin/withdrawals/${w.id}/reject`, {}, authHeaders);
+                    flash('Rejected.');
+                    fetchData();
+                  }} className="px-3 py-1.5 bg-red-100 text-red-700 rounded text-sm flex items-center gap-1 hover:bg-red-200">
+                    <XCircle size={14} /> Reject
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+    );
+  };
+
+  const renderPricing = () => (
+    <Section title="Pricing — Rate Control">
+      <div className="bg-white border border-gray-200 rounded-xl p-6 mt-4 max-w-md">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Scraper Batch Rate (₦ per batch)</label>
+            <input type="number" title="Scraper Batch Rate" placeholder="2.50" className="w-full border border-gray-300 rounded px-3 py-2" value={pricingScraper} onChange={e => setPricingScraper(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Outreach Batch Rate (₦ per batch)</label>
+            <input type="number" title="Outreach Batch Rate" placeholder="5.00" className="w-full border border-gray-300 rounded px-3 py-2" value={pricingOutreach} onChange={e => setPricingOutreach(e.target.value)} />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Withdrawal Limit (₦ max per request)</label>
+            <input type="number" title="Withdrawal Limit" placeholder="5000" className="w-full border border-gray-300 rounded px-3 py-2" value={pricingWithdrawLimit} onChange={e => setPricingWithdrawLimit(e.target.value)} />
+          </div>
+          <button onClick={async () => {
+            setSaving(true);
+            try {
+              await axios.post(`${BACKEND_URL}/api/admin/earnings_rates`, {
+                scraper_rate: Number(pricingScraper),
+                outreach_rate: Number(pricingOutreach),
+                withdrawal_limit: Number(pricingWithdrawLimit)
+              }, authHeaders);
+              flash('✅ Rates saved successfully.');
+            } catch { flash('❌ Failed to save rates.'); }
+            setSaving(false);
+          }} disabled={saving} className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
+            {saving ? 'Saving...' : 'Save Rates'}
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+
+  const renderVersionControl = () => (
+    <Section title="Version Control — App Publisher">
+      <div className="bg-white border border-gray-200 rounded-xl p-6 mt-4 max-w-lg">
+        <p className="text-sm text-gray-500 mb-4">Publish a new version. Workers will see an update badge and can click to auto-install from the Google Drive link.</p>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Version Number (e.g. 1.2.0)</label>
+            <input title="Version Number" className="w-full border border-gray-300 rounded px-3 py-2 text-sm" value={versionStr} onChange={e => setVersionStr(e.target.value)} placeholder="1.2.0" />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Google Drive Download Link</label>
+            <input title="Download Link" className="w-full border border-gray-300 rounded px-3 py-2 text-sm" value={versionUrl} onChange={e => setVersionUrl(e.target.value)} placeholder="https://drive.google.com/..." />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Changelog / Release Notes</label>
+            <textarea title="Changelog" className="w-full border border-gray-300 rounded px-3 py-2 text-sm h-20 resize-none" value={versionChangelog} onChange={e => setVersionChangelog(e.target.value)} placeholder="What's new in this version..." />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+            <input type="checkbox" checked={versionForce} onChange={e => setVersionForce(e.target.checked)} />
+            Force update (workers must update before they can continue)
+          </label>
+          <button onClick={async () => {
+            if (!versionStr || !versionUrl) { flash('Version number and download URL are required.'); return; }
+            setSaving(true);
+            try {
+              await axios.post(`${BACKEND_URL}/api/admin/versions`, {
+                version_string: versionStr,
+                download_url: versionUrl,
+                changelog: versionChangelog,
+                min_required_version: versionForce ? versionStr : null
+              }, authHeaders);
+              setVersionStr(''); setVersionUrl(''); setVersionChangelog(''); setVersionForce(false);
+              flash('✅ Version published. Workers will see the update.');
+            } catch { flash('❌ Failed to publish version.'); }
+            setSaving(false);
+          }} disabled={saving} className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
+            {saving ? 'Publishing...' : 'Publish Update'}
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+
+  const renderBugReport = () => {
+    const bugs = data?.bugs || [];
+    return (
+      <Section title="Bug Reports">
+        {loading ? <div className="flex justify-center p-12"><Loader2 className="animate-spin" size={28} /></div> : (
+          <div className="space-y-3 mt-4">
+            {bugs.length === 0 && <p className="text-gray-500 text-sm">No open bug reports. 🎉</p>}
+            {bugs.map((b: any) => (
+              <div key={b.id} className="bg-white border border-gray-200 rounded-xl p-4">
+                <div className="flex justify-between items-start gap-4">
+                  <div>
+                    <span className="text-xs font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full">Worker #{b.worker_id}</span>
+                    <h4 className="font-semibold text-red-600 mt-1">{b.title}</h4>
+                  </div>
+                  <button onClick={async () => {
+                    await axios.delete(`${BACKEND_URL}/api/admin/bugs?id=${b.id}`, authHeaders);
+                    flash('Bug report deleted.');
+                    fetchData();
+                  }} className="text-red-500 hover:text-red-700 flex items-center gap-1 text-sm flex-shrink-0">
+                    <Trash2 size={14} /> Delete
+                  </button>
+                </div>
+                <p className="text-gray-700 mt-2 text-sm whitespace-pre-wrap break-words">{b.description}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+    );
+  };
+
+  const renderSettings = () => (
+    <Section title="Settings — Admin Password">
+      <div className="bg-white border border-gray-200 rounded-xl p-6 mt-4 max-w-md">
+        <p className="text-sm text-gray-500 mb-4">Update the admin secret key used to access this dashboard.</p>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">New Admin Password</label>
+            <input type="password" className="w-full border border-gray-300 rounded px-3 py-2 text-sm" value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="Enter new password" />
+          </div>
+          <button onClick={async () => {
+            if (!newPassword) return;
+            setSaving(true);
+            try {
+              await axios.post(`${BACKEND_URL}/api/admin/settings`, { ADMIN_SECRET_KEY: newPassword }, authHeaders);
+              setNewPassword('');
+              flash('✅ Password updated. You will need to use the new password next login.');
+            } catch { flash('❌ Failed to update password.'); }
+            setSaving(false);
+          }} disabled={saving || !newPassword} className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50">
+            {saving ? 'Saving...' : 'Update Password'}
+          </button>
+        </div>
+      </div>
+    </Section>
+  );
+
+  const renderAccessKeys = () => {
+    const keys = data?.keys || [];
+    const requests = data?.requests || [];
+    return (
+      <Section title="Access Keys" action={
+        <button onClick={async () => {
+          if (!newKeyValue || !newKeyOwner) { flash('Enter both key value and owner name.'); return; }
+          try {
+            await axios.post(`${BACKEND_URL}/api/admin/keys`, { key_value: newKeyValue, owner_name: newKeyOwner }, authHeaders);
+            setNewKeyValue(''); setNewKeyOwner('');
+            flash('✅ Access key created.');
+            fetchData();
+          } catch (e: any) { flash('❌ ' + (e.response?.data?.error || e.message)); }
+        }} className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 flex items-center gap-2">
+          <Plus size={14} /> Add New Key
+        </button>
+      }>
+        <div className="bg-white border border-gray-200 rounded-xl p-4 mt-4 flex gap-3">
+          <input className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm" placeholder="Key Value (e.g. JUDD-ABC123)" value={newKeyValue} onChange={e => setNewKeyValue(e.target.value)} />
+          <input className="flex-1 border border-gray-300 rounded px-3 py-2 text-sm" placeholder="Owner Name" value={newKeyOwner} onChange={e => setNewKeyOwner(e.target.value)} />
+        </div>
+        {/* Key Requests — Always Visible */}
+        <div className="mt-6">
+          <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Pending Access Key Requests</h3>
+          {requests.length === 0 ? (
+            <p className="text-gray-400 text-sm italic bg-gray-50 border border-gray-100 rounded-lg p-4">No pending requests. When workers request a key from the Electron app, they will appear here.</p>
+          ) : (
+            <div className="space-y-2">
+              {requests.map((r: any) => (
+                <div key={r.id} className="bg-indigo-50 border border-indigo-100 rounded-lg p-4 flex justify-between items-center">
+                  <div>
+                    <p className="font-semibold text-indigo-900">{r.worker_name || r.contact_info}</p>
+                    <p className="text-xs text-indigo-600 mt-0.5">📧 {r.contact_info}</p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">Requested: {r.created_at?.split('T')[0]}</p>
+                  </div>
+                  <button onClick={async () => {
+                    try {
+                      const res = await axios.post(`${BACKEND_URL}/api/admin/keys/requests/${r.id}/approve`, {}, authHeaders);
+                      flash(`✅ Approved! Key: ${res.data.key}`);
+                      fetchData();
+                    } catch { flash('❌ Failed to approve.'); }
+                  }} className="px-3 py-1 bg-indigo-600 text-white rounded text-xs font-bold hover:bg-indigo-700">Approve & Generate Key</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-8">
+          <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-3">Managed Access Keys</h3>
+          <TableLayout
+            columns={['ID', 'Key Value', 'Owner', 'Status', 'Leads Done', 'Earnings (₦)', 'Last Active']}
+            rows={keys.map((k: any) => ({ 
+              id: k.id, 
+              key: k.key_value, 
+              owner: k.owner_name, 
+              status: (
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${k.is_banned ? 'bg-red-100 text-red-700' : (k.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-700')}`}>
+                  {k.is_banned ? 'BANNED' : (k.is_active ? 'ACTIVE' : 'INACTIVE')}
+                </span>
+              ),
+              leads: k.total_leads_processed ?? 0, 
+              earnings: `₦${Number(k.total_earnings_ngn || 0).toLocaleString()}`,
+              lastActive: k.last_active ? new Date(k.last_active).toLocaleDateString() : 'Never'
+            }))}
+            actions={(row: any) => (
+              <>
+                <button 
+                  title={row.status.props.children === 'BANNED' ? 'Unban Key' : 'Ban Key'}
+                  onClick={async () => {
+                    const isBanned = row.status.props.children === 'BANNED';
+                    await axios.put(`${BACKEND_URL}/api/admin/keys`, { id: row.id, is_banned: !isBanned }, authHeaders);
+                    flash(isBanned ? '✅ Key unbanned.' : '🚫 Key banned.');
+                    fetchData();
+                  }} 
+                  className={`p-1 rounded ${row.status.props.children === 'BANNED' ? 'text-green-600 hover:bg-green-50' : 'text-orange-600 hover:bg-orange-50'}`}
+                >
+                  <XCircle size={16} />
+                </button>
+                <button 
+                  title="Delete Key"
+                  onClick={async () => {
+                    if(!confirm('Permanently delete this key?')) return;
+                    await axios.delete(`${BACKEND_URL}/api/admin/keys?id=${row.id}`, authHeaders);
+                    flash('🗑️ Key deleted.');
+                    fetchData();
+                  }} 
+                  className="p-1 text-red-600 hover:bg-red-50 rounded"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </>
+            )}
+          />
+        </div>
+        {requests.length > 0 && (
+          <>
+            <h3 className="font-semibold text-gray-700 mt-8 mb-3">Key Requests from Workers</h3>
+            <TableLayout
+              columns={['ID', 'Name', 'Email/Contact', 'Status']}
+              rows={requests.map((r: any) => ({ id: r.id, name: r.worker_name, contact: r.contact_info, status: r.status }))}
+            />
+          </>
+        )}
+      </Section>
+    );
+  };
+
+  const SECTION_MAP: Record<string, () => JSX.Element> = {
+    overview: renderOverview,
+    keywords: renderKeywords,
+    leads: renderLeads,
+    campaigns: renderCampaigns,
+    notification: renderNotification,
+    withdrawal: renderWithdrawal,
+    pricing: renderPricing,
+    version_control: renderVersionControl,
+    bug_report: renderBugReport,
+    settings: renderSettings,
+    access_keys: renderAccessKeys,
+  };
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
-      <div className="w-64 bg-white border-r border-gray-200 flex flex-col">
-        <div className="p-6 border-b border-gray-200">
-          <h1 className="text-xl font-bold text-gray-900 tracking-tight">CMining<span className="text-indigo-600">Admin</span></h1>
+      {/* Sidebar */}
+      <div className="w-56 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+        <div className="p-5 border-b border-gray-200">
+          <h1 className="text-lg font-bold text-gray-900">CMining<span className="text-indigo-600">Admin</span></h1>
         </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-1">
+        <div className="flex-1 overflow-y-auto p-3 space-y-0.5">
           {tabs.map(t => (
-            <SidebarItem key={t.id} icon={t.icon} label={t.label} isActive={activeTab === t.id} onClick={() => setActiveTab(t.id)} />
+            <SidebarItem key={t.id} icon={t.icon} label={t.label} isActive={activeTab === t.id} onClick={() => { setActiveTab(t.id); setData(null); }} />
           ))}
         </div>
         <div className="p-4 border-t border-gray-200">
-          <button onClick={() => setAdminToken(null)} className="flex items-center gap-2 text-red-600 hover:bg-red-50 w-full px-4 py-2 rounded-lg transition-colors font-medium">
-            <LogOut size={20} /> Logout
+          <button onClick={() => setAdminToken(null)} className="flex items-center gap-2 text-red-600 hover:bg-red-50 w-full px-3 py-2 rounded-lg transition-colors text-sm font-medium">
+            <LogOut size={16} /> Logout
           </button>
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8 fade-in">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-semibold text-gray-900">{tabs.find(t => t.id === activeTab)?.label}</h2>
-          {['keys', 'campaigns'].includes(activeTab) && (
-            <button onClick={() => openModal(activeTab)} className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700">
-              <Plus size={16} /> Add New
-            </button>
-          )}
-        </div>
-        
-        {loading ? <div className="flex justify-center p-12"><Loader2 className="animate-spin text-indigo-600" size={32} /></div> : (
-          <>
-            {activeTab === 'analytics' && data && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8 mt-4">
-                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-                  <h3 className="text-sm font-medium text-gray-500 mb-1">Active Workers</h3>
-                  <p className="text-3xl font-bold text-gray-900">{data?.workers?.active}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-                  <h3 className="text-sm font-medium text-gray-500 mb-1">Total Leads Extracted</h3>
-                  <p className="text-3xl font-bold text-gray-900">{data?.leads?.total}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
-                  <h3 className="text-sm font-medium text-gray-500 mb-1">Successful Outreaches</h3>
-                  <p className="text-3xl font-bold text-green-600">{data?.leads?.successes}</p>
-                </div>
-              </div>
-            )}
-            
-            {activeTab === 'keys' && data?.keys && <TableLayout columns={['ID', 'Key', 'Owner', 'Active', 'Leads', 'Earnings']} dataList={data.keys} />}
-            {activeTab === 'workers' && data?.workers && <TableLayout columns={['ID', 'Owner', 'Last Active', 'Active', 'Banned']} dataList={data.workers} />}
-            {activeTab === 'leads' && data?.leads && <TableLayout columns={['ID', 'Name', 'Website', 'Status', 'Worker ID']} dataList={data.leads} />}
-            {activeTab === 'campaigns' && data?.campaigns && <TableLayout columns={['ID', 'Keyword', 'Status', 'Results']} dataList={data.campaigns} />}
-            {activeTab === 'withdrawals' && data?.withdrawals && <TableLayout columns={['ID', 'Amount', 'Worker ID']} dataList={data.withdrawals} />}
-            {activeTab === 'bugs' && data?.bugs && <TableLayout columns={['ID', 'Title', 'Desc']} dataList={data.bugs} />}
-            {activeTab === 'settings' && data?.settings && <pre className="bg-gray-800 text-green-400 p-4 rounded-lg">{JSON.stringify(data.settings, null, 2)}</pre>}
-            
-            {['notifications', 'earnings', 'versions'].includes(activeTab) && (
-              <div className="bg-white border text-center border-gray-200 rounded-xl p-12 text-gray-500 shadow-sm flex flex-col items-center justify-center">
-                 <div className="p-4 bg-gray-50 rounded-full mb-4">
-                    <Settings size={32} className="text-gray-400" />
-                 </div>
-                 <p className="text-lg font-medium text-gray-900">Form Submission UI Required</p>
-                 <p className="text-sm mt-1">This section accepts POST requests to configuration endpoints.</p>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {modalOpen && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white p-6 rounded-lg shadow-xl w-96 max-w-[90%] fade-in">
-            <h3 className="text-xl font-bold mb-4 text-gray-900 border-b pb-2">
-              Add New {modalType === 'keys' ? 'Access Key' : 'Campaign Keyword'}
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {modalType === 'keys' ? 'Key Value (e.g. JUDD-123)' : 'Keyword Text (e.g. Plumbers in NY)'}
-                </label>
-                <input 
-                  type="text" 
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" 
-                  value={modalInput1} 
-                  onChange={e => setModalInput1(e.target.value)} 
-                  placeholder={modalType === 'keys' ? 'Enter random secure key' : 'Enter target search phrase'}
-                />
-              </div>
-              {modalType === 'keys' && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Owner Name (Worker Identifier)</label>
-                  <input 
-                    type="text" 
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" 
-                    value={modalInput2} 
-                    onChange={e => setModalInput2(e.target.value)} 
-                    placeholder="e.g. John Doe - Remote"
-                  />
-                </div>
-              )}
-              <div className="flex justify-end gap-3 mt-6 pt-4 border-t">
-                <button onClick={() => setModalOpen(false)} className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-md transition-colors">
-                  Cancel
-                </button>
-                <button 
-                  onClick={handleCreate} 
-                  disabled={!modalInput1} 
-                  className="px-4 py-2 bg-indigo-600 disabled:opacity-50 text-white text-sm font-medium rounded-md hover:bg-indigo-700 transition-colors"
-                >
-                  Create Now
-                </button>
-              </div>
-            </div>
+      {/* Main Content */}
+      <div className="flex-1 overflow-y-auto p-8">
+        {msg && (
+          <div className={`mb-4 px-4 py-3 rounded-lg text-sm font-medium ${msg.startsWith('✅') ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}>
+            {msg}
           </div>
-        </div>
-      )}
+        )}
+        {(SECTION_MAP[activeTab] || renderOverview)()}
+      </div>
     </div>
   );
 }
-
